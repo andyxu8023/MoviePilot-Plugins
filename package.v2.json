@@ -3,7 +3,7 @@
     "name": "剧集缺失订阅",
     "description": "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅",
     "labels": "订阅",
-    "version": "2.0.7",
+    "version": "2.0.8",
     "icon": "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
     "author": "boeto，左岸",
     "level": 2,
@@ -16,7 +16,7 @@
 · 被跳过的剧集在状态中显示 ⏭️ 图标
 · 按钮文字根据跳过状态动态变化
 4. 其他改进
-· 更新了插件版本号到 2.0.7
+· 更新了插件版本号到 2.0.8
 · 添加了跳过图标
 · 改进了历史记录的处理逻辑
 · 电视剧媒体库白名单手动填写改成下拉选择
