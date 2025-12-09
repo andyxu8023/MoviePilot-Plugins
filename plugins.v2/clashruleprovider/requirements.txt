@@ -1,3 +1,0 @@
-websockets
-sse_starlette~=2.3.6
-PyYAML~=6.0.2
