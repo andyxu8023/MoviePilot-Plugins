@@ -1,5 +1,5 @@
 {
-  "SiteStatistic": {
+  "GetMissingEpisodes": {
     "name": "剧集缺失订阅",
     "description": "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅",
     "labels": "订阅",
