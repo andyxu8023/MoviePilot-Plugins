@@ -38,9 +38,9 @@ class HistoryDataType(Enum):
     NO_EXIST = "存在缺失"
     FAILED = "失败记录"
     ALL = "所有记录"
-    LATEST = "最新6条记录"
+    LATEST = "最近记录"
     NOT_ALL_NO_EXIST = "已有季缺失"
-    SKIPPED = "已跳过记录"  # 新增：已跳过的记录
+    SKIPPED = "已跳过记录"
 
 
 class NoExistAction(Enum):
@@ -56,7 +56,8 @@ class Icons(Enum):
     GLASSES = "icon_3d_glasses"
     ADD_SCHEDULE = "icon_add_schedule"
     TARGET = "icon_target"
-    SKIP = "icon_skip"  # 新增：跳过图标
+    SKIP = "icon_skip"
+    RECENT = "icon_recent"  # 新增：最近记录图标
 
 
 class GetMissingEpisodesInfo(TypedDict, total=False):
@@ -146,11 +147,11 @@ class GetMissingEpisodes(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
     # 插件版本
-    plugin_version = "2.0.8"  # 更新版本号
+    plugin_version = "2.0.9"  # 更新版本号
     # 插件作者
     plugin_author = "boeto，左岸"
     # 作者主页
-    author_url = "https://github.com/andyxu8023/MoviePilot-Plugins"
+    author_url = "https://github.com/boeto/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "getmissingepisodes_"
     # 加载顺序
@@ -183,11 +184,14 @@ class GetMissingEpisodes(_PluginBase):
     _only_season_exist: bool = True
     _only_aired: bool = True  # 新增：仅订阅已开播剧集开关
 
-    _history_type: str = HistoryDataType.LATEST.value
+    # 不再使用_history_type配置项
     _no_exist_action: str = NoExistAction.ONLY_HISTORY.value
     _save_path_replaces: List[str] = []
     _whitelist_librarys: List[str] = []
     _whitelist_media_servers: List[str] = []
+
+    # 存储当前选中的历史数据类型
+    _current_history_type: str = HistoryDataType.LATEST.value
 
     def init_plugin(self, config: dict[str, Any] | None = None):
         self._subChain = SubscribeChain()
@@ -216,9 +220,7 @@ class GetMissingEpisodes(_PluginBase):
                 "no_exist_action", NoExistAction.ONLY_HISTORY.value
             )
 
-            self._history_type = config.get(
-                "history_type", HistoryDataType.LATEST.value
-            )
+            # 不再读取history_type配置
             _save_path_replaces = config.get("save_path_replaces", "")
             if _save_path_replaces and isinstance(_save_path_replaces, str):
                 self._save_path_replaces = _save_path_replaces.split("\n")
@@ -250,6 +252,11 @@ class GetMissingEpisodes(_PluginBase):
                 self._whitelist_media_servers = [ms for ms in _whitelist_media_servers if ms]
             else:
                 self._whitelist_media_servers = []
+
+        # 从存储中读取当前选中的历史数据类型
+        saved_type = self.get_data("current_history_type")
+        if saved_type:
+            self._current_history_type = saved_type
 
         # 停止现有任务
         self.stop_service()
@@ -326,6 +333,12 @@ class GetMissingEpisodes(_PluginBase):
                 "endpoint": self.toggle_skip_history,
                 "methods": ["GET"],
                 "summary": f"切换 {self.plugin_name} 跳过状态",
+            },
+            {
+                "path": "/set_history_type",
+                "endpoint": self.set_history_type,
+                "methods": ["GET"],
+                "summary": f"设置 {self.plugin_name} 历史数据类型",
             },
         ]
 
@@ -882,7 +895,7 @@ class GetMissingEpisodes(_PluginBase):
             "clear": self._clear,
             "only_season_exist": self._only_season_exist,
             "only_aired": self._only_aired,  # 新增：保存仅已开播配置
-            "history_type": self._history_type,
+            # 不再保存history_type
             "no_exist_action": self._no_exist_action,
             "save_path_replaces": "\n".join(
                 map(str, self._save_path_replaces)
@@ -1192,6 +1205,27 @@ class GetMissingEpisodes(_PluginBase):
             logger.warn(f"切换跳过状态 {key} 失败")
             return schemas.Response(success=False, message="切换跳过状态失败")
 
+    def set_history_type(self, history_type: str, apikey: str):
+        """
+        设置历史数据类型
+        """
+        logger.info(f"设置历史数据类型: {history_type}")
+        if apikey != settings.API_TOKEN:
+            logger.warn("API密钥错误")
+            return schemas.Response(success=False, message="API密钥错误")
+        
+        # 验证历史数据类型是否有效
+        valid_types = [dt.value for dt in HistoryDataType]
+        if history_type not in valid_types:
+            logger.warn(f"无效的历史数据类型: {history_type}")
+            return schemas.Response(success=False, message="无效的历史数据类型")
+        
+        # 保存当前选中的历史数据类型
+        self._current_history_type = history_type
+        self.save_data("current_history_type", history_type)
+        logger.info(f"历史数据类型已设置为: {history_type}")
+        return schemas.Response(success=True, message="设置成功")
+
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         # 获取所有可用的媒体库
         available_libraries = []
@@ -1291,7 +1325,7 @@ class GetMissingEpisodes(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -1305,54 +1339,7 @@ class GetMissingEpisodes(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "history_type",
-                                            "label": "历史数据类型",
-                                            "items": [
-                                                {
-                                                    "title": f"{HistoryDataType.LATEST.value}",
-                                                    "value": f"{HistoryDataType.LATEST.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.NO_EXIST.value}",
-                                                    "value": f"{HistoryDataType.NO_EXIST.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.NOT_ALL_NO_EXIST.value}",
-                                                    "value": f"{HistoryDataType.NOT_ALL_NO_EXIST.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.SKIPPED.value}",
-                                                    "value": f"{HistoryDataType.SKIPPED.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.ALL_EXIST.value}",
-                                                    "value": f"{HistoryDataType.ALL_EXIST.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.ADDED_RSS.value}",
-                                                    "value": f"{HistoryDataType.ADDED_RSS.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.FAILED.value}",
-                                                    "value": f"{HistoryDataType.FAILED.value}",
-                                                },
-                                                {
-                                                    "title": f"{HistoryDataType.ALL.value}",
-                                                    "value": f"{HistoryDataType.ALL.value}",
-                                                },
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VSelect",
@@ -1448,9 +1435,8 @@ class GetMissingEpisodes(_PluginBase):
             "only_season_exist": True,
             "only_aired": True,  # 新增：默认开启仅订阅已开播剧集
             "clear": False,
-            "history_type": HistoryDataType.LATEST.value,
-            "save_path_replaces": "",
             "no_exist_action": NoExistAction.ONLY_HISTORY.value,
+            "save_path_replaces": "",
             "whitelist_media_servers": "",
             "whitelist_librarys": [],
         }
@@ -1657,7 +1643,7 @@ class GetMissingEpisodes(_PluginBase):
                                 "class": "object-cover shadow ring-gray-500 max-w-40",
                                 "cover": True,
                                 "transition": True,
-                                "lazy-src": "data:image/png;base64,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",
+                                "lazy-src": "data:image/png;base64,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",
                             },
                         },
                         {
@@ -1754,6 +1740,9 @@ class GetMissingEpisodes(_PluginBase):
             for history in historys:
                 posts_content.append(self.__get_history_post_content(history))
 
+        # 获取当前历史数据类型的显示名称
+        history_type_display = self._current_history_type
+        
         component = {
             "component": "div",
             "content": [
@@ -1765,7 +1754,7 @@ class GetMissingEpisodes(_PluginBase):
                     "content": [
                         {
                             "component": "span",
-                            "text": f"··· {self._history_type} ···",
+                            "text": f"··· {history_type_display} ···",
                         }
                     ],
                 },
@@ -1853,19 +1842,94 @@ class GetMissingEpisodes(_PluginBase):
                     "M685.4 354.8c-13.6-13.6-35.6-13.6-49.2 0L512 478.6 387.8 354.8c-13.6-13.6-35.6-13.6-49.2 0-13.6 13.6-13.6 35.6 0 49.2L462.8 528 338.6 652.2c-13.6 13.6-13.6 35.6 0 49.2 13.6 13.6 35.6 13.6 49.2 0L512 577.4l124.2 124.2c13.6 13.6 35.6 13.6 49.2 0 13.6-13.6 13.6-35.6 0-49.2L561.2 528l124.2-124.2c13.6-13.6 13.6-35.6 0-49.2z",
                 ],
             ),
+            Icons.RECENT: GetMissingEpisodes.__get_svg_content(
+                color,
+                [
+                    "M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z",
+                    "M686.7 638.6L544.1 535.5V288c0-4.4-3.6-8-8-8H488c-4.4 0-8 3.6-8 8v275.4c0 2.8 1.5 5.5 4 6.9l165.4 120.6c3.2 2.3 7.6 2.1 10.6-.5l39.4-39.4c2.8-2.8 3-7.3.6-10.4z",
+                ],
+            ),
         }
         return icon_content
 
     @staticmethod
     def __get_historys_statistic_content(
-        title: str, value: str, icon_name: Icons
+        title: str, value: str, icon_name: Icons, history_type: str, current_history_type: str
     ) -> dict[str, Any]:
-        icon_content = GetMissingEpisodes.__get_icon_content().get(icon_name, "")
+        # 根据是否选中来设置卡片样式和图标颜色
+        is_selected = current_history_type == history_type
+        card_color = "primary" if is_selected else "tonal"
+        icon_color = "#1976d2" if is_selected else "#8a8a8a"
+        
+        # 获取图标路径
+        icon_paths = {
+            Icons.STATISTICS: [
+                "M471.04 270.336V20.48c-249.856 20.48-450.56 233.472-450.56 491.52 0 274.432 225.28 491.52 491.52 491.52 118.784 0 229.376-40.96 315.392-114.688L655.36 708.608c-40.96 28.672-94.208 45.056-139.264 45.056135.168 0-245.76-106.496-245.76-245.76 0-114.688 81.92-217.088 200.704-237.568z",
+                "M552.96 20.48v249.856C655.36 286.72 737.28 368.64 753.664 471.04h249.856C983.04 233.472 790.528 40.96 552.96 20.48zM712.704 651.264l176.128 176.128c65.536-77.824 106.496-172.032 114.688-274.432h-249.856c-8.192 36.864-20.48 69.632-40.96 98.304z",
+            ],
+            Icons.WARNING: [
+                "M965.316923 727.276308l-319.015385-578.953846c-58.171077-106.299077-210.944-106.023385-268.996923 0l-318.621538 579.347692c-56.359385 102.636308 18.116923 227.643077 134.695385 227.643077h637.243076c116.184615 0 191.172923-124.416 134.695385-228.036923z m-453.316923 26.781538c-24.812308 0-44.504615-20.086154-44.504615-44.504615 0-24.812308 19.692308-44.898462 44.504615-44.898462a44.701538 44.701538 0 0 1 0 89.403077z m57.501538-361.156923l-20.873846 170.929231c-1.575385 19.298462-17.329231 33.870769-36.627692 33.870769s-35.446154-14.572308-37.021538-33.870769l-20.48-170.929231c-3.150769-33.870769 23.630769-63.015385 57.501538-63.015385 29.932308 0 57.501538 21.582769 57.501538 63.015385z"
+            ],
+            Icons.BUG_REMOVE: [
+                "M945.000296 566.802963c-25.486222-68.608-91.211852-79.530667-144.19437-72.855704a464.402963 464.402963 0 0 0-29.316741-101.148444c20.366222-8.343704 48.279704-12.136296 70.731852 14.487704a37.925926 37.925926 0 0 0 57.912889-49.000297c-51.655111-61.060741-117.94963-53.589333-164.636445-32.426666a333.482667 333.482667 0 0 0-72.021333-78.696297c2.654815-11.377778 4.399407-23.021037 4.399408-35.157333 0-19.683556-4.020148-38.305185-10.695112-55.675259 10.467556-10.960593 30.644148-25.979259 61.705482-23.058963a37.660444 37.660444 0 0 0 41.339259-34.17126 37.925926 37.925926 0 0 0-34.133333-41.339259 145.294222 145.294222 0 0 0-113.246815 36.560593A153.182815 153.182815 0 0 0 513.137778 56.888889c-36.408889 0-69.404444 13.160296-95.876741 34.285037a145.59763 145.59763 0 0 0-109.37837-33.450667 37.925926 37.925926 0 1 0 7.205926 75.548445 73.007407 73.007407 0 0 1 55.902814 17.597629A154.737778 154.737778 0 0 0 358.4 212.005926c0 12.212148 1.782519 23.969185 4.475259 35.384889A334.051556 334.051556 0 0 0 290.512593 326.807704c-46.800593-21.845333-114.194963-30.492444-166.646519 31.478518a37.925926 37.925926 0 0 0 57.912889 49.000297c23.134815-27.382519 52.261926-22.641778 72.969481-13.615408a464.213333 464.213333 0 0 0-28.975407 100.655408c-53.475556-7.395556-120.832 2.768593-146.773333 72.438518a37.925926 37.925926 0 1 0 71.111111 26.43437c10.24-27.534222 44.259556-27.230815 68.532148-23.134814-0.644741 33.374815 1.137778 64.891259 9.253926 106.192592-38.456889 10.884741-81.768296 39.405037-101.793185 103.461926a37.925926 37.925926 0 0 0 72.438518 22.603852c11.150222-35.65037 32.768-48.810667 49.682963-53.551407 47.900444 129.024 148.555852 218.339556 265.102222 218.339555 116.280889 0 216.746667-88.936296 264.798815-217.467259 16.535704 5.271704 36.712296 18.659556 47.369482 52.679111a37.888 37.888 0 1 0 72.400592-22.603852c-19.569778-62.691556-61.44-91.401481-99.252148-102.779259 8.305778-42.059852 10.012444-73.500444 9.367704-107.254519 24.007111-3.678815 55.978667-3.109926 65.877333 23.514074a37.925926 37.925926 0 1 0 71.111111-26.396444z m-321.308444 69.973333c14.791111 14.791111 14.791111 39.063704 0 53.854815a38.039704 38.039704 0 0 1-53.475556 0l-56.888889-56.888889-56.888888 56.888889a38.456889 38.456889 0 0 1-53.854815 0c-14.791111-14.791111-14.791111-39.063704 0-53.854815l56.888889-56.888889-56.888889-56.888888a37.774222 37.774222 0 0 1 0-53.475556c14.791111-14.791111 39.063704-14.791111 53.854815 0l56.888888 56.888889 56.888889-56.888889a37.774222 37.774222 0 0 1 53.475556 0c14.791111 14.791111 14.791111 38.684444 0 53.475556l-56.888889 56.888888 56.888889 56.888889z"
+            ],
+            Icons.GLASSES: [
+                "M1028.096 503.808L815.104 204.8c-8.192-12.288-20.48-16.384-32.768-16.384h-126.976c-24.576 0-40.96 20.48-40.96 40.96 0 24.576 20.48 40.96 40.96 40.96h102.4l131.072 184.32H143.36l135.168-188.416h102.4c24.576 0 40.96-16.384 40.96-40.96s-16.384-40.96-40.96-40.96H253.952c-16.384 0-24.576 8.192-32.768 16.384L8.192 499.712c0 8.192-8.192 32.768-8.192 53.248v188.416c0 53.248 45.056 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416-12.288h122.88V741.376c0 53.248 40.96 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416c0-16.384-8.192-40.96-12.288-49.152zM376.832 716.8c0 20.48-16.384 40.96-40.96 40.96H122.88c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96H335.872c24.576 0 40.96 16.384 40.96 40.96v135.168z m581.632 0c0 20.48-16.384 40.96-40.96 40.96H704.512c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96h212.992c24.576 0 40.96 16.384 40.96 40.96v135.168z",
+            ],
+            Icons.ADD_SCHEDULE: [
+                "M611.157333 583.509333h-63.146666v-63.146666c0-20.138667-16.042667-36.181333-35.84-36.181334-20.138667 0-35.84 16.042667-35.84 35.84v63.146667h-63.146667c-19.797333 0-36.181333 16.384-36.181333 36.181333 0.7168 21.128533 16.759467 35.498667 36.181333 36.181334h63.146667v62.805333c0 20.923733 16.759467 35.84 35.84 35.84 19.797333 0 35.84-16.042667 35.84-35.84v-63.146667h63.146666a35.84 35.84 0 1 0 0-71.68z",
+                "M839.338667 145.749333h-13.653334v86.016c0 56.32-45.738667 102.4-102.4 102.4-56.32 0-102.4-46.08-102.4-102.4V145.749333h-217.770666v86.016c0 56.32-46.08 102.4-102.4 102.4-56.661333 0-102.4-46.08-102.4-102.4V145.749333h-13.653334C120.490667 145.749333 68.266667 197.973333 68.266667 262.144v551.594667c0 64.170667 52.224 116.394667 116.394666 116.394666h654.677334c64.170667 0 116.394667-52.224 116.394666-116.394666V262.144c0-64.170667-52.224-116.394667-116.394666-116.394667z m0 716.117334H184.661333c-26.624 0-48.128-21.504-48.128-48.128V402.773333h750.933334v410.965334c0 26.624-21.504 48.128-48.128 48.128z",
+                "M300.612267 265.796267a34.133333 34.133333 0 0 0 34.133333-34.133334V128a34.133333 34.133333 0 1 0-68.266667 0v103.6288a34.133333 34.133333 0 0 0 34.133334 34.133333zM723.3536 265.796267a34.133333 34.133333 0 0 0 34.133333-34.133334V128a34.133333 34.133333 0 1 0-68.266666 0v103.6288a34.133333 34.133333 0 0 0 34.133333 34.133333z",
+            ],
+            Icons.TARGET: [
+                "M512 307.2c-114.688 0-204.8 90.112-204.8 204.8 0 110.592 90.112 204.8 204.8 204.8s204.8-90.112 204.8-204.8-90.112-204.8-204.8-204.8z",
+                "M962.56 471.04H942.08c-20.48-204.8-184.32-372.736-389.12-389.12v-20.48c0-24.576-16.384-40.96-40.96-40.96s-40.96 16.384-40.96 40.96v16.384c-204.8 20.48-372.736 184.32-389.12 393.216h-20.48c-24.576 0-40.96 16.384-40.96 40.96s16.384 40.96 40.96 40.96h16.384c20.48 204.8 184.32 372.736 393.216 393.216v16.384c0 24.576 16.384 40.96 40.96 40.96s40.96-16.384 40.96-40.96V942.08c204.8-20.48 372.736-184.32 393.216-389.12h16.384c24.576 0 40.96-16.384 40.96-40.96s-16.384-40.96-40.96-40.96z m-409.6 389.12v-24.576c0-24.576-16.384-40.96-40.96-40.96s-40.96 16.384-40.96 40.96v24.576c-159.744-20.48-290.816-147.456-307.2-307.2h24.576c24.576 0 40.96-16.384 40.96-40.96s-16.384-40.96-40.96-40.96H163.84c16.384-159.744 147.456-290.816 307.2-307.2v24.576c0 24.576 16.384 40.96 40.96 40.96s40.96-16.384 40.96-40.96V163.84c159.744 20.48 290.816 147.456 307.2 307.2h-24.576c-24.576 0-40.96 16.384-40.96 40.96s16.384 40.96 40.96 40.96h24.576c-16.384 159.744-147.456 290.816-307.2 307.2z",
+            ],
+            Icons.SKIP: [
+                "M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z",
+                "M685.4 354.8c-13.6-13.6-35.6-13.6-49.2 0L512 478.6 387.8 354.8c-13.6-13.6-35.6-13.6-49.2 0-13.6 13.6-13.6 35.6 0 49.2L462.8 528 338.6 652.2c-13.6 13.6-13.6 35.6 0 49.2 13.6 13.6 35.6 13.6 49.2 0L512 577.4l124.2 124.2c13.6 13.6 35.6 13.6 49.2 0 13.6-13.6 13.6-35.6 0-49.2L561.2 528l124.2-124.2c13.6-13.6 13.6-35.6 0-49.2z",
+            ],
+            Icons.RECENT: [
+                "M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z",
+                "M686.7 638.6L544.1 535.5V288c0-4.4-3.6-8-8-8H488c-4.4 0-8 3.6-8 8v275.4c0 2.8 1.5 5.5 4 6.9l165.4 120.6c3.2 2.3 7.6 2.1 10.6-.5l39.4-39.4c2.8-2.8 3-7.3.6-10.4z",
+            ],
+        }
+        
+        # 创建SVG图标
+        svg_content = {
+            "component": "svg",
+            "props": {
+                "class": "icon",
+                "viewBox": "0 0 1024 1024",
+                "width": "40",
+                "height": "40",
+            },
+            "content": []
+        }
+        
+        # 添加路径
+        for path in icon_paths.get(icon_name, []):
+            svg_content["content"].append({
+                "component": "path",
+                "props": {"fill": icon_color, "d": path},
+            })
+        
         total_elements = {
             "component": "VCard",
             "props": {
-                "variant": "tonal",
-                "style": "width: 10rem;",
+                "variant": card_color,
+                "style": "width: 10rem; cursor: pointer;",
+                "class": "clickable-stat-card",
+            },
+            "events": {
+                "click": {
+                    "api": "plugin/GetMissingEpisodes/set_history_type",
+                    "method": "get",
+                    "params": {
+                        "history_type": history_type,
+                        "apikey": settings.API_TOKEN,
+                    },
+                }
             },
             "content": [
                 {
@@ -1874,7 +1938,7 @@ class GetMissingEpisodes(_PluginBase):
                         "class": "d-flex align-center",
                     },
                     "content": [
-                        icon_content,
+                        svg_content,
                         {
                             "component": "div",
                             "props": {
@@ -1918,42 +1982,60 @@ class GetMissingEpisodes(_PluginBase):
         historys_skipped_total,
     ):
 
-        # 数据统计
+        # 从数据中获取当前选中的历史数据类型
+        saved_history_type = self.get_data("current_history_type")
+        if saved_history_type:
+            self._current_history_type = saved_history_type
+
+        # 数据统计，每个统计项对应一个历史数据类型
         data_statistics = [
+            {
+                "title": "最近处理",
+                "value": f"{min(historys_total, 10)}部",
+                "icon_name": Icons.RECENT,
+                "history_type": HistoryDataType.LATEST.value,
+            },
             {
                 "title": "总处理",
                 "value": f"{historys_total}部",
                 "icon_name": Icons.STATISTICS,
+                "history_type": HistoryDataType.ALL.value,
             },
             {
                 "title": "存在缺失",
                 "value": f"{historys_no_exist_total}部",
                 "icon_name": Icons.WARNING,
+                "history_type": HistoryDataType.NO_EXIST.value,
             },
             {
                 "title": "已有季缺失",
                 "value": f"{history_not_all_no_exist_total}部",
                 "icon_name": Icons.TARGET,
+                "history_type": HistoryDataType.NOT_ALL_NO_EXIST.value,
             },
             {
                 "title": "未识别",
                 "value": f"{historys_fail_total}部",
                 "icon_name": Icons.BUG_REMOVE,
+                "history_type": HistoryDataType.FAILED.value,
             },
             {
                 "title": "全部存在",
                 "value": f"{historys_all_exist_total}部",
                 "icon_name": Icons.GLASSES,
+                "history_type": HistoryDataType.ALL_EXIST.value,
             },
             {
                 "title": "已订阅",
                 "value": f"{historys_added_rss_total}部",
                 "icon_name": Icons.ADD_SCHEDULE,
+                "history_type": HistoryDataType.ADDED_RSS.value,
             },
             {
                 "title": "已跳过",
                 "value": f"{historys_skipped_total}部",
                 "icon_name": Icons.SKIP,
+                "history_type": HistoryDataType.SKIPPED.value,
             },
         ]
 
@@ -1963,6 +2045,8 @@ class GetMissingEpisodes(_PluginBase):
                     title=str(s["title"]),
                     value=str(s["value"]),
                     icon_name=Icons(s["icon_name"]),
+                    history_type=str(s["history_type"]),
+                    current_history_type=self._current_history_type,
                 ),
                 data_statistics,
             )
@@ -2038,7 +2122,12 @@ class GetMissingEpisodes(_PluginBase):
         sort_history(history_no_exist)
         sort_history(history_skipped)
 
-        # 根据_history_type确定使用的列表
+        # 从数据中获取当前选中的历史数据类型
+        saved_history_type = self.get_data("current_history_type")
+        if saved_history_type:
+            self._current_history_type = saved_history_type
+
+        # 根据当前选中的历史数据类型确定使用的列表
         history_type_to_list = {
             HistoryDataType.FAILED.value: history_failed,
             HistoryDataType.ADDED_RSS.value: history_added_rss,
@@ -2046,6 +2135,7 @@ class GetMissingEpisodes(_PluginBase):
             HistoryDataType.NO_EXIST.value: history_no_exist,
             HistoryDataType.SKIPPED.value: history_skipped,
             HistoryDataType.ALL.value: history_all,
+            HistoryDataType.LATEST.value: history_all[:10],  # 最近10条记录
         }
 
         def __get_season_episode_no_exist_info(
@@ -2072,11 +2162,11 @@ class GetMissingEpisodes(_PluginBase):
             )
         ]
 
-        if self._history_type == HistoryDataType.NOT_ALL_NO_EXIST.value:
+        if self._current_history_type == HistoryDataType.NOT_ALL_NO_EXIST.value:
             historys_in_type = history_not_all_no_exist
         else:
             historys_in_type = history_type_to_list.get(
-                self._history_type, history_all[:6]
+                self._current_history_type, history_all[:10]  # 默认显示最近10条
             )
 
         historys_posts_content = self.__get_historys_posts_content(
