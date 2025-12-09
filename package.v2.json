@@ -3,7 +3,7 @@
     "name": "剧集缺失订阅",
     "description": "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅",
     "labels": "订阅",
-    "version": "2.0.9",
+    "version": "2.1.0",
     "icon": "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
     "author": "boeto，左岸",
     "level": 2,
