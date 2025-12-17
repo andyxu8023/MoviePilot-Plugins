@@ -59,7 +59,8 @@ class Icons(Enum):
 class GetMissingEpisodesInfo(TypedDict, total=False):
     season: Optional[int]
     episode_no_exist: Optional[List[int]]
-    episode_total: int
+    episode_total: int  # 筛选后的总集数（用于检查）
+    episode_total_unfiltered: int  # 实际总集数（用于订阅）
 
 
 class TvNoExistInfo(TypedDict):
@@ -160,7 +161,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集缺失订阅"
     plugin_desc = "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "2.1.1"  # 更新版本号
+    plugin_version = "2.1.2"  # 更新版本号
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -591,12 +592,14 @@ class GetMissingEpisodes(_PluginBase):
             season: int,
             episode_no_exist: List[int],
             episode_total: int,
+            episode_total_unfiltered: int,  # 新增参数：实际总集数
         ):
             logger.debug(f"添加【{title}】第【{season}】季缺失集：{episode_no_exist}")
             season_info: GetMissingEpisodesInfo = {
                 "season": season,
                 "episode_no_exist": episode_no_exist,
-                "episode_total": episode_total,
+                "episode_total": episode_total,  # 筛选后的总集数
+                "episode_total_unfiltered": episode_total_unfiltered,  # 实际总集数
             }
             
             tv_no_exist_info["season_episode_no_exist_info"][str(season)] = season_info
@@ -652,11 +655,15 @@ class GetMissingEpisodes(_PluginBase):
                     if self._subOper.exists(tmdbid, None, season=season):
                         logger.info(f"【{title}】第【{season}】季已存在订阅, 跳过")
                         continue
+                    
+                    # 获取实际总集数
+                    episode_total_unfiltered = self.__get_total_episodes_unfiltered(tmdbid, season)
                         
                     __append_season_info(
                         season=season,
                         episode_no_exist=[],
                         episode_total=len(filted_episodes),
+                        episode_total_unfiltered=episode_total_unfiltered,
                     )
             else:
                 logger.debug(f"【{title}】检查每季缺失的集")
@@ -668,8 +675,11 @@ class GetMissingEpisodes(_PluginBase):
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
                         continue
                         
-                    # 该季总集数
+                    # 该季总集数（筛选后的）
                     episode_total = len(filted_episodes)
+                    
+                    # 获取实际总集数
+                    episode_total_unfiltered = self.__get_total_episodes_unfiltered(tmdbid, season)
 
                     # 该季已存在的集
                     exist_episode = exist_season_info.get(season)
@@ -694,6 +704,7 @@ class GetMissingEpisodes(_PluginBase):
                             season=season,
                             episode_no_exist=lack_episode,
                             episode_total=episode_total,
+                            episode_total_unfiltered=episode_total_unfiltered,
                         )
                     else:
                         logger.debug(f"【{title}】第【{season}】季全集不存在")
@@ -703,6 +714,7 @@ class GetMissingEpisodes(_PluginBase):
                                 season=season,
                                 episode_no_exist=[],
                                 episode_total=episode_total,
+                                episode_total_unfiltered=episode_total_unfiltered,
                             )
 
             logger.debug(f"【{title}】季集信息: {tv_no_exist_info}")
@@ -766,6 +778,18 @@ class GetMissingEpisodes(_PluginBase):
         logger.debug(f"筛选后的集数: {episodes}")
         return episodes
 
+    def __get_total_episodes_unfiltered(self, tmdbid, season):
+        """获取实际总集数（不经过筛选）"""
+        try:
+            episodes_info = self._tmdbChain.tmdb_episodes(tmdbid=tmdbid, season=season)
+            if episodes_info:
+                return len(episodes_info)
+        except Exception as e:
+            logger.error(f"获取TMDB实际总集数失败: {str(e)}")
+        
+        # 如果获取失败，返回0
+        return 0
+
     def _update_config(self):
         """更新配置"""
         config = {
@@ -814,6 +838,7 @@ class GetMissingEpisodes(_PluginBase):
         season: int,
         save_path: str | None = None,
         total_episode: int | None = None,
+        total_episode_unfiltered: int | None = None,  # 新增参数：实际总集数
     ):
         """检查并添加订阅"""
         title_season = f"{title} ({year}) 第 {season} 季"
@@ -847,6 +872,9 @@ class GetMissingEpisodes(_PluginBase):
                 logger.warning("season 无法转换为整数")
                 return False
 
+        # 优先使用实际总集数，如果未提供则使用筛选后的总集数
+        final_total_episode = total_episode_unfiltered or total_episode
+        
         # 添加订阅
         try:
             is_add_success, msg = self._subChain.add(
@@ -858,7 +886,7 @@ class GetMissingEpisodes(_PluginBase):
                 exist_ok=True,
                 username=self.plugin_name,
                 save_path=save_path_replaced,
-                total_episode=total_episode,
+                total_episode=final_total_episode,  # 使用实际总集数
             )
             logger.debug(f"添加订阅 {title_season} 结果: {is_add_success}, {msg}")
             if not is_add_success:
@@ -899,6 +927,7 @@ class GetMissingEpisodes(_PluginBase):
         for season_key in season_episode_no_exist_info.keys():
             season_info = season_episode_no_exist_info.get(season_key)
             total_episode = season_info.get("episode_total") if season_info else None
+            total_episode_unfiltered = season_info.get("episode_total_unfiltered") if season_info else None
             episode_no_exist = season_info.get("episode_no_exist") if season_info else None
             
             if not episode_no_exist:
@@ -926,6 +955,7 @@ class GetMissingEpisodes(_PluginBase):
                 season=season_int,
                 save_path=save_path,
                 total_episode=total_episode,
+                total_episode_unfiltered=total_episode_unfiltered,
             )
             if not is_add_subscribe_success:
                 all_success = False
