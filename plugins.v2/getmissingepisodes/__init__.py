@@ -103,8 +103,10 @@ def create_tv_no_exist_info(
 class HistoryDetail(TypedDict):
     exist_status: Optional[str]
     tv_no_exist_info: Optional[TvNoExistInfo]
-    last_update: Optional[str]
-    last_update_full: Optional[str]
+    last_check: Optional[str]  # 改为最后检查时间
+    last_check_full: Optional[str]  # 改为最后检查时间（完整格式）
+    first_found_time: Optional[str]  # 新增：首次发现时间
+    last_status_change: Optional[str]  # 新增：最后状态变更时间
     skip: Optional[bool]
 
 
@@ -161,7 +163,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集缺失订阅"
     plugin_desc = "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "2.1.2"  # 更新版本号
+    plugin_version = "2.1.3"  # 更新版本号
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -396,21 +398,48 @@ class GetMissingEpisodes(_PluginBase):
         ):
             with self._lock:
                 current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # 检查是否已有记录，保留跳过状态
-                existing_skip = False
-                if item_unique_flag in history_data["details"]:
-                    existing_skip = history_data["details"][item_unique_flag].get("skip", False)
-
-                history_data["details"][item_unique_flag] = {
-                    "exist_status": exist_status.value,
-                    "tv_no_exist_info": tv_no_exist_info if tv_no_exist_info else None,
-                    "last_update": current_time.strftime("%m-%d %H:%M"),
-                    "last_update_full": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "skip": existing_skip,
-                }
+                # 检查是否已有记录
+                existing_record = history_data["details"].get(item_unique_flag)
                 
-                logger.debug(f"添加检查记录: {item_unique_flag}")
+                if existing_record:
+                    # 已有记录，检查状态是否变化
+                    existing_skip = existing_record.get("skip", False)
+                    first_found_time = existing_record.get("first_found_time", existing_record.get("last_check_full", current_time_str))
+                    previous_status = existing_record.get("exist_status")
+                    
+                    # 判断状态是否变化
+                    status_changed = previous_status != exist_status.value
+                    
+                    # 如果状态变化，更新最后状态变更时间，否则保持不变
+                    if status_changed:
+                        last_status_change = current_time_str
+                    else:
+                        last_status_change = existing_record.get("last_status_change", existing_record.get("last_check_full", current_time_str))
+                    
+                    history_data["details"][item_unique_flag] = {
+                        "exist_status": exist_status.value,
+                        "tv_no_exist_info": tv_no_exist_info if tv_no_exist_info else existing_record.get("tv_no_exist_info"),
+                        "last_check": current_time.strftime("%m-%d %H:%M"),
+                        "last_check_full": current_time_str,
+                        "first_found_time": first_found_time,
+                        "last_status_change": last_status_change,
+                        "skip": existing_skip,
+                    }
+                else:
+                    # 新记录
+                    history_data["details"][item_unique_flag] = {
+                        "exist_status": exist_status.value,
+                        "tv_no_exist_info": tv_no_exist_info,
+                        "last_check": current_time.strftime("%m-%d %H:%M"),
+                        "last_check_full": current_time_str,
+                        "first_found_time": current_time_str,
+                        "last_status_change": current_time_str,  # 新记录的状态变更时间就是发现时间
+                        "skip": False,
+                    }
+                
+                logger.debug(f"添加/更新检查记录: {item_unique_flag}, 状态: {exist_status.value}")
                 self.save_data("history", history_data)
 
         mediaservers = self.__get_mediaservers()
@@ -903,6 +932,9 @@ class GetMissingEpisodes(_PluginBase):
         """根据唯一标识更新存在状态"""
         if unique in historys["details"]:
             historys["details"][unique]["exist_status"] = new_status
+            # 状态变化时更新最后状态变更时间
+            current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+            historys["details"][unique]["last_status_change"] = current_time.strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"更新检查记录 {unique} 状态为: {new_status}")
             return True, historys
         else:
@@ -1061,6 +1093,9 @@ class GetMissingEpisodes(_PluginBase):
         if key in historys["details"]:
             current_skip = historys["details"][key].get("skip", False)
             historys["details"][key]["skip"] = not current_skip
+            # 跳过状态变化时也更新状态变更时间
+            current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+            historys["details"][key]["last_status_change"] = current_time.strftime("%Y-%m-%d %H:%M:%S")
             self.save_data("history", historys)
             message = "取消跳过" if current_skip else "已跳过"
             logger.info(f"{message} {key}")
@@ -1430,7 +1465,7 @@ class GetMissingEpisodes(_PluginBase):
             return seasons_count, episodes_count
 
         history = history or {}
-        time_str = history.get("last_update")
+        time_str = history.get("last_check")  # 改为显示最后检查时间
         skip_status = history.get("skip", False)
 
         tv_no_exist_info: TvNoExistInfo = history.get("tv_no_exist_info") or {}
@@ -1840,8 +1875,13 @@ class GetMissingEpisodes(_PluginBase):
 
         details = historys.get("details", {})
 
-        def sort_history(history_list):
-            history_list.sort(key=lambda x: x["last_update_full"], reverse=True)
+        def sort_by_last_status_change(history_list):
+            """按最后状态变更时间排序"""
+            history_list.sort(key=lambda x: x.get("last_status_change", x.get("last_check_full", "")), reverse=True)
+
+        def sort_by_last_check(history_list):
+            """按最后检查时间排序"""
+            history_list.sort(key=lambda x: x.get("last_check_full", ""), reverse=True)
 
         history_failed: List[ExtendedHistoryDetail] = []
         history_all_exist: List[ExtendedHistoryDetail] = []
@@ -1872,13 +1912,13 @@ class GetMissingEpisodes(_PluginBase):
             if target_list is not None:
                 target_list.append(item_with_key)
 
-        # 对所有列表排序
-        sort_history(history_all)
-        sort_history(history_failed)
-        sort_history(history_all_exist)
-        sort_history(history_added_rss)
-        sort_history(history_no_exist)
-        sort_history(history_skipped)
+        # 对"最近处理"列表使用状态变更时间排序，其他列表使用检查时间排序
+        sort_by_last_status_change(history_all)
+        sort_by_last_check(history_failed)
+        sort_by_last_check(history_all_exist)
+        sort_by_last_check(history_added_rss)
+        sort_by_last_check(history_no_exist)
+        sort_by_last_check(history_skipped)
 
         # 从数据中获取当前选中的历史数据类型
         saved_history_type = self.get_data("current_history_type")
@@ -1893,7 +1933,7 @@ class GetMissingEpisodes(_PluginBase):
             HistoryDataType.NO_EXIST.value: history_no_exist,
             HistoryDataType.SKIPPED.value: history_skipped,
             HistoryDataType.ALL.value: history_all,
-            HistoryDataType.LATEST.value: history_all[:10],  # 最近10条记录
+            HistoryDataType.LATEST.value: history_all[:10],  # 最近10条记录（按状态变更时间排序）
         }
 
         def __get_season_episode_no_exist_info(_history: ExtendedHistoryDetail):
@@ -1915,6 +1955,8 @@ class GetMissingEpisodes(_PluginBase):
                 for season_info in __get_season_episode_no_exist_info(history)
             )
         ]
+        # 对"已有季缺失"列表按状态变更时间排序
+        sort_by_last_status_change(history_not_all_no_exist)
 
         if self._current_history_type == HistoryDataType.NOT_ALL_NO_EXIST.value:
             historys_in_type = history_not_all_no_exist
