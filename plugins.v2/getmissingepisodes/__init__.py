@@ -175,7 +175,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集缺失订阅"
     plugin_desc = "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "2.2.0"  # 更新版本号
+    plugin_version = "2.2.1"  # 更新版本号
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
