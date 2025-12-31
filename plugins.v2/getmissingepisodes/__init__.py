@@ -1576,7 +1576,7 @@ class GetMissingEpisodes(_PluginBase):
         
         # 如果被跳过，在状态中显示
         if skip_status:
-            status = f"⏭️ {status}"
+            status = f"{status}⏭️"
 
         mp_domain = settings.MP_DOMAIN()
         link = f"#/media?mediaid=tmdb:{tmdbid}&type={MediaType.TV.value}"
@@ -1645,7 +1645,7 @@ class GetMissingEpisodes(_PluginBase):
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 pb-1 whitespace-nowrap"
                                     },
-                                    "text": f"状态: {status}",
+                                    "text": f"本地状态: {status}",
                                 },
                                 {
                                     "component": "VCardText",
@@ -1659,7 +1659,7 @@ class GetMissingEpisodes(_PluginBase):
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"
                                     },
-                                    "text": f"年份: {year}",
+                                    "text": f"开播年份: {year}",
                                 },
                                 {
                                     "component": "VCardText",
@@ -1673,14 +1673,14 @@ class GetMissingEpisodes(_PluginBase):
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"
                                     },
-                                    "text": f"检查: {time_str}",
+                                    "text": f"检查时间: {time_str}",
                                 },
                                 {
                                     "component": "VCardText",
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"
                                     },
-                                    "text": f"最后: {last_air_date}",
+                                    "text": f"最后播出: {last_air_date}",
                                 },
                             ],
                         },
