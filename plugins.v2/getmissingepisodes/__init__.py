@@ -175,7 +175,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集缺失订阅"
     plugin_desc = "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "2.2.1"  # 更新版本号
+    plugin_version = "2.2.2"  # 更新版本号
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -1244,6 +1244,7 @@ class GetMissingEpisodes(_PluginBase):
                                         "props": {
                                             "model": "only_season_exist",
                                             "label": "仅检查已有季缺失",
+                                            "hint": "开启：只检查媒体库中所有剧（除已跳过）已存在的季是否有集的缺失；关闭：检查媒体库中所有剧（除已跳过）是否存在季和集的缺失",
                                         },
                                     }
                                 ],
@@ -1558,7 +1559,6 @@ class GetMissingEpisodes(_PluginBase):
 
         tv_no_exist_info: TvNoExistInfo = history.get("tv_no_exist_info") or {}
         title = tv_no_exist_info.get("title", "未知")
-        title = title[:8] + "..." if len(title) > 8 else title
         year = tv_no_exist_info.get("year", "未知")
         tmdbid = tv_no_exist_info.get("tmdbid", 0)
         poster = tv_no_exist_info.get("poster_path", default_poster_path)
@@ -1599,7 +1599,8 @@ class GetMissingEpisodes(_PluginBase):
             "component": "VCard",
             "props": {
                 "variant": "tonal",
-                "props": {"class": ""},
+                "style": "width: 320px; min-height: 240px;",  # 固定卡片大小
+                "class": "history-card",
             },
             "content": [
                 {
@@ -1621,13 +1622,16 @@ class GetMissingEpisodes(_PluginBase):
                         },
                         {
                             "component": "div",
-                            "props": {"class": ""},
+                            "props": {
+                                "class": "flex flex-col",
+                                "style": "width: 160px;",  # 固定文字区域宽度
+                            },
                             "content": [
                                 {
                                     "component": "VCardTitle",
                                     "props": {
-                                        "class": "pt-6 pl-4 pr-4 text-lg whitespace-nowrap",
-                                        "style": "width: 12rem",
+                                        "class": "pt-6 pl-4 pr-4 text-lg",
+                                        "style": "word-break: break-word; white-space: normal; line-height: 1.2;",  # 允许换行
                                     },
                                     "content": [
                                         {
@@ -1635,6 +1639,7 @@ class GetMissingEpisodes(_PluginBase):
                                             "props": {
                                                 "href": f"{href}",
                                                 "target": "_blank",
+                                                "style": "text-decoration: none; color: inherit;",
                                             },
                                             "text": title,
                                         }
@@ -1652,7 +1657,7 @@ class GetMissingEpisodes(_PluginBase):
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"
                                     },
-                                    "text": f"剧集状态: {status_cn}",  # 新增：显示剧集状态
+                                    "text": f"剧集状态: {status_cn}",
                                 },
                                 {
                                     "component": "VCardText",
@@ -1689,7 +1694,7 @@ class GetMissingEpisodes(_PluginBase):
                 {
                     "component": "VBtnToggle",
                     "props": {
-                        "class": "d-flex",
+                        "class": "d-flex mt-auto",
                         "style": "width: 100%; display: flex;",
                         "variant": "tonal",
                         "rounded": "0",
@@ -1738,7 +1743,8 @@ class GetMissingEpisodes(_PluginBase):
                 {
                     "component": "div",
                     "props": {
-                        "class": "flex flex-row flex-wrap gap-4 items-center justify-center",
+                        "class": "flex flex-row flex-wrap gap-4 items-start justify-center",
+                        "style": "margin: 0 auto; max-width: 100%;",  # 确保容器适应
                     },
                     "content": posts_content,
                 },
