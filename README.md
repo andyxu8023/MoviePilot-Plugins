@@ -5,4 +5,5 @@
 # 配置页面
 ![配置页面](./images/3.jpg)
 # 相关功能
-![相关功能](./images/4.jpg),(./images/5.jpg)
+![相关功能](./images/4.jpg)
+![相关功能](./images/5.jpg)
