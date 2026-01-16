@@ -1671,7 +1671,7 @@ class GetMissingEpisodes(_PluginBase):
                                     "props": {
                                         "class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"
                                     },
-                                    "text": f"评分: {vote}",
+                                    "text": f"TMDB评分: {vote}",
                                 },
                                 {
                                     "component": "VCardText",
