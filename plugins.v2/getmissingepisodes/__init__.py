@@ -173,7 +173,7 @@ class SVGPaths:
 
 class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集缺失订阅"
-    plugin_desc = "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅"
+    plugin_desc = "检查指定媒体库中是否存在剧集的季或集的缺失，以补全订阅及满足对剧集新季的追更"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
     plugin_version = "2.2.4"  # 更新版本号
     plugin_author = "boeto，左岸"
