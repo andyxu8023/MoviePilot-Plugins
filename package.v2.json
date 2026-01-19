@@ -3,11 +3,12 @@
     "name": "剧集缺失订阅",
     "description": "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅",
     "labels": "订阅",
-    "version": "2.2.3",
+    "version": "2.2.4",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
     "author": "boeto，左岸",
     "level": 2,
     "history": {
+      "v2.2.4": "修复2.2.3中的逻辑错误",
       "v2.2.3": "（修复已完结剧集本地存在缺失不检测的问题）存在逻辑错误，正在修复中，请勿更新此版本",
       "v2.2.2": "优化详情展示页面剧集名显示，过长的剧集名自动换行以保证剧名显示完整",
       "v2.2.1": "纠正v2.2.0版本对自动跳过已完结剧集开关相关说明文字的描述错误",
