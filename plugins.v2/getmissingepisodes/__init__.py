@@ -152,7 +152,7 @@ class SVGPaths:
                 "M1028.096 503.808L815.104 204.8c-8.192-12.288-20.48-16.384-32.768-16.384h-126.976c-24.576 0-40.96 20.48-40.96 40.96 0 24.576 20.48 40.96 40.96 40.96h102.4l131.072 184.32H143.36l135.168-188.416h102.4c24.576 0 40.96-16.384 40.96-40.96s-16.384-40.96-40.96-40.96H253.952c-16.384 0-24.576 8.192-32.768 16.384L8.192 499.712c0 8.192-8.192 32.768-8.192 53.248v188.416c0 53.248 45.056 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416-12.288h122.88V741.376c0 53.248 40.96 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416c0-16.384-8.192-40.96-12.288-49.152zM376.832 716.8c0 20.48-16.384 40.96-40.96 40.96H122.88c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96H335.872c24.576 0 40.96 16.384 40.96 40.96v135.168z m581.632 0c0 20.48-16.384 40.96-40.96 40.96H704.512c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96h212.992c24.576 0 40.96 16.384 40.96 40.96v135.168z",
             ],
             Icons.STATISTICS: [
-                "M471.04 270.336V20.48c-249.856 20.56-450.56 233.472-450.56 491.52 0 274.432 225.28 491.52 491.52 491.52 118.784 0 229.376-40.96 315.392-114.688L655.36 708.608c-40.96 28.672-94.208 45.056-139.264 45.056135.168 0-245.76-106.496-245.76-245.76 0-114.688 81.92-217.088 200.704-237.568z",
+                "M471.04 270.336V20.48c-249.856 20.48-450.56 233.472-450.56 491.52 0 274.432 225.28 491.52 491.52 491.52 118.784 0 229.376-40.96 315.392-114.688L655.36 708.608c-40.96 28.672-94.208 45.056-139.264 45.056135.168 0-245.76-106.496-245.76-245.76 0-114.688 81.92-217.088 200.704-237.568z",
                 "M552.96 20.48v249.856C655.36 286.72 737.28 368.64 753.664 471.04h249.856C983.04 233.472 790.528 40.96 552.96 20.48zM712.704 651.264l176.128 176.128c65.536-77.824 106.496-172.032 114.688-274.432h-249.856c-8.192 36.864-20.48 69.632-40.96 98.304z",
             ],
             Icons.SKIP: [
@@ -417,6 +417,14 @@ class GetMissingEpisodes(_PluginBase):
                 # 检查是否已有记录
                 existing_record = history_data["details"].get(item_unique_flag)
                 
+                # 检查是否需要自动跳过已完结剧集
+                auto_skip = False
+                if self._auto_skip_finished and tv_no_exist_info:
+                    status_cn = tv_no_exist_info.get("status_cn", "")
+                    if status_cn == "已完结":
+                        auto_skip = True
+                        logger.info(f"【{tv_no_exist_info.get('title', '未知')}】已完结，自动标记为跳过")
+                
                 if existing_record:
                     # 已有记录，检查状态是否变化
                     existing_skip = existing_record.get("skip", False)
@@ -432,6 +440,9 @@ class GetMissingEpisodes(_PluginBase):
                     else:
                         last_status_change = existing_record.get("last_status_change", existing_record.get("last_check_full", current_time_str))
                     
+                    # 如果自动跳过，更新skip状态
+                    final_skip = existing_skip or auto_skip
+                    
                     history_data["details"][item_unique_flag] = {
                         "exist_status": exist_status.value,
                         "tv_no_exist_info": tv_no_exist_info if tv_no_exist_info else existing_record.get("tv_no_exist_info"),
@@ -439,7 +450,7 @@ class GetMissingEpisodes(_PluginBase):
                         "last_check_full": current_time_str,
                         "first_found_time": first_found_time,
                         "last_status_change": last_status_change,
-                        "skip": existing_skip,
+                        "skip": final_skip,
                     }
                 else:
                     # 新记录
@@ -450,7 +461,7 @@ class GetMissingEpisodes(_PluginBase):
                         "last_check_full": current_time_str,
                         "first_found_time": current_time_str,
                         "last_status_change": current_time_str,  # 新记录的状态变更时间就是发现时间
-                        "skip": False,
+                        "skip": auto_skip,  # 如果是已完结且开启自动跳过，则自动跳过
                     }
                 
                 logger.debug(f"添加/更新检查记录: {item_unique_flag}, 状态: {exist_status.value}")
@@ -559,17 +570,6 @@ class GetMissingEpisodes(_PluginBase):
                                 exist_status=HistoryStatus.ALL_EXIST,
                                 tv_no_exist_info=tv_no_exist_info,
                             )
-                            
-                            # 在记录添加完成后，如果是已完结剧集且开启了自动跳过，则标记为跳过
-                            if (self._auto_skip_finished and 
-                                tv_no_exist_info.get("status_cn") == "已完结"):
-                                # 获取最新记录并更新跳过状态
-                                current_history = self.get_data("history")
-                                if current_history and item_unique_flag in current_history.get("details", {}):
-                                    current_history["details"][item_unique_flag]["skip"] = True
-                                    self.save_data("history", current_history)
-                                    logger.info(f"【{item_title}】已完结且无缺失，自动标记为跳过")
-                                    
                         else:
                             logger.info(f"【{item_title}】缺失集数信息：{tv_no_exist_info}")
 
@@ -591,17 +591,6 @@ class GetMissingEpisodes(_PluginBase):
                                         exist_status=HistoryStatus.NO_EXIST,
                                         tv_no_exist_info=tv_no_exist_info,
                                     )
-                                    
-                                # 订阅操作完成后，如果是已完结剧集且开启了自动跳过，则标记为跳过
-                                if (self._auto_skip_finished and 
-                                    tv_no_exist_info.get("status_cn") == "已完结"):
-                                    # 获取最新记录并更新跳过状态
-                                    current_history = self.get_data("history")
-                                    if current_history and item_unique_flag in current_history.get("details", {}):
-                                        current_history["details"][item_unique_flag]["skip"] = True
-                                        self.save_data("history", current_history)
-                                        logger.info(f"【{item_title}】已完结，订阅完成后自动标记为跳过")
-                                        
                             elif self._no_exist_action == NoExistAction.SET_ALL_EXIST.value:
                                 logger.debug("将缺失季集标记为存在")
                                 __append_history(
@@ -609,17 +598,6 @@ class GetMissingEpisodes(_PluginBase):
                                     exist_status=HistoryStatus.ALL_EXIST,
                                     tv_no_exist_info=tv_no_exist_info,
                                 )
-                                
-                                # 标记为存在后，如果是已完结剧集且开启了自动跳过，则标记为跳过
-                                if (self._auto_skip_finished and 
-                                    tv_no_exist_info.get("status_cn") == "已完结"):
-                                    # 获取最新记录并更新跳过状态
-                                    current_history = self.get_data("history")
-                                    if current_history and item_unique_flag in current_history.get("details", {}):
-                                        current_history["details"][item_unique_flag]["skip"] = True
-                                        self.save_data("history", current_history)
-                                        logger.info(f"【{item_title}】已完结，标记为存在后自动跳过")
-                                        
                             else:
                                 logger.debug("仅记录缺失集数")
                                 __append_history(
@@ -627,17 +605,6 @@ class GetMissingEpisodes(_PluginBase):
                                     exist_status=HistoryStatus.NO_EXIST,
                                     tv_no_exist_info=tv_no_exist_info,
                                 )
-                                
-                                # 仅记录缺失后，如果是已完结剧集且开启了自动跳过，则标记为跳过
-                                if (self._auto_skip_finished and 
-                                    tv_no_exist_info.get("status_cn") == "已完结"):
-                                    # 获取最新记录并更新跳过状态
-                                    current_history = self.get_data("history")
-                                    if current_history and item_unique_flag in current_history.get("details", {}):
-                                        current_history["details"][item_unique_flag]["skip"] = True
-                                        self.save_data("history", current_history)
-                                        logger.info(f"【{item_title}】已完结，记录缺失后自动跳过")
-                                        
                     else:
                         logger.warning(f"【{item_title}】获取缺失集数信息失败")
                         __append_history(
@@ -645,17 +612,6 @@ class GetMissingEpisodes(_PluginBase):
                             exist_status=HistoryStatus.FAILED,
                             tv_no_exist_info=tv_no_exist_info,
                         )
-                        
-                        # 获取信息失败后，如果是已完结剧集且开启了自动跳过，则标记为跳过
-                        if (self._auto_skip_finished and 
-                            tv_no_exist_info and 
-                            tv_no_exist_info.get("status_cn") == "已完结"):
-                            # 获取最新记录并更新跳过状态
-                            current_history = self.get_data("history")
-                            if current_history and item_unique_flag in current_history.get("details", {}):
-                                current_history["details"][item_unique_flag]["skip"] = True
-                                self.save_data("history", current_history)
-                                logger.info(f"【{item_title}】已完结，获取信息失败后自动跳过")
 
                 logger.info(f"{mediaserver} 媒体库 {library.name} 获取数据完成")
 
