@@ -1256,32 +1256,6 @@ class GetMissingEpisodes(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "clear",
-                                            "label": "清理检查记录",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "onlyonce",
-                                            "label": "立即运行一次",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
                                             "model": "only_aired",
                                             "label": "仅订阅已开播剧集",
                                             "hint": "开启：只订阅已开播的剧集；关闭：订阅所有剧集（包括未开播）",
@@ -1303,6 +1277,32 @@ class GetMissingEpisodes(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "clear",
+                                            "label": "清理检查记录",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "onlyonce",
+                                            "label": "立即运行一次",
+                                        },
+                                    }
+                                ],
+                            },                   
                         ],
                     },
                     {
