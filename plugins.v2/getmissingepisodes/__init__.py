@@ -1411,6 +1411,27 @@ class GetMissingEpisodes(_PluginBase):
                             }
                         ],
                     },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': '注意：插件首次检测时建议缺失处理方式选择[仅检查记录]，根据检查记录手动跳过一些不需要持续检测的剧集，然后再将缺失处理方式改为[添加到订阅]，以尽量避免因TMDB上某些剧集信息错误而产生误订阅。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
                 ],
             }
         ], {
