@@ -1234,21 +1234,7 @@ class GetMissingEpisodes(_PluginBase):
                                         },
                                     }
                                 ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "only_season_exist",
-                                            "label": "仅检查已有季缺失",
-                                            "hint": "开启：只检查媒体库中所有剧（除已跳过）已存在的季是否有集的缺失；关闭：检查媒体库中所有剧（除已跳过）是否存在季和集的缺失",
-                                        },
-                                    }
-                                ],
-                            },
+                            },                            
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
@@ -1273,6 +1259,20 @@ class GetMissingEpisodes(_PluginBase):
                                             "model": "auto_skip_finished",
                                             "label": "自动跳过已完结剧集",
                                             "hint": "开启：已完结的剧集自动跳过检测；关闭：正常检测已完结剧集（注意：因TMDB剧集状态可随意编辑不一定准确，部分剧集实际并未完结却被标记成已完结，而导致插件漏检。出现此情况可自行去TMDB更改剧集状态，然后手动取消跳过该剧集。）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "only_season_exist",
+                                            "label": "仅检查已有季缺失",
+                                            "hint": "开启：只检查媒体库中所有剧（除已跳过）已存在的季是否有集的缺失；关闭：检查媒体库中所有剧（除已跳过）是否存在季和集的缺失",
                                         },
                                     }
                                 ],
