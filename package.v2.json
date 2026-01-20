@@ -1,7 +1,7 @@
 {
   "GetMissingEpisodes": {
-    "name": "剧集缺失订阅",
-    "description": "检查指定媒体库中是否存在剧集的季、集缺失，以补全订阅",
+    "name": "剧集新季追更补全订阅",
+    "description": "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全",
     "labels": "订阅",
     "version": "2.2.4",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
