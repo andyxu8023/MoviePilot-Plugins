@@ -1,6 +1,6 @@
 {
   "GetMissingEpisodes": {
-    "name": "剧集补全新季追更",
+    "name": "剧集补全&新季追更",
     "description": "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全",
     "labels": "订阅",
     "version": "2.2.4",
