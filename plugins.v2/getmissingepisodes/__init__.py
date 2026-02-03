@@ -209,6 +209,7 @@ class GetMissingEpisodes(_PluginBase):
     _whitelist_media_servers: List[str] = []
     _current_history_type: str = HistoryDataType.LATEST.value
     _auto_skip_finished: bool = False  # 新增：自动跳过已完结剧集
+    _include_s00_season: bool = False  # 新增：是否包含S00季检测
 
     def init_plugin(self, config: dict[str, Any] | None = None):
         """初始化插件"""
@@ -249,6 +250,7 @@ class GetMissingEpisodes(_PluginBase):
         self._only_aired = config.get("only_aired", True)
         self._no_exist_action = config.get("no_exist_action", NoExistAction.ONLY_HISTORY.value)
         self._auto_skip_finished = config.get("auto_skip_finished", False)  # 新增
+        self._include_s00_season = config.get("include_s00_season", False)  # 新增：加载S00季配置
 
         # 处理保存路径替换
         _save_path_replaces = config.get("save_path_replaces", "")
@@ -706,6 +708,11 @@ class GetMissingEpisodes(_PluginBase):
                 logger.debug(f"【{title}】全部季不存在, 添加全部季集数")
                 # 全部季不存在
                 for season, _ in tmdbinfo_seasons:
+                    # 新增：检查是否跳过S00季
+                    if season == 0 and not self._include_s00_season:
+                        logger.debug(f"【{title}】跳过S00季检测")
+                        continue
+                        
                     filted_episodes = self.__filter_episodes(tmdbid, season)
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
@@ -729,6 +736,11 @@ class GetMissingEpisodes(_PluginBase):
                 logger.debug(f"【{title}】检查每季缺失的集")
                 # 检查每季缺失的季集
                 for season, _ in tmdbinfo_seasons:
+                    # 新增：检查是否跳过S00季
+                    if season == 0 and not self._include_s00_season:
+                        logger.debug(f"【{title}】跳过S00季检测")
+                        continue
+                    
                     filted_episodes = self.__filter_episodes(tmdbid, season)
                     logger.debug(f"【{title}】第【{season}】季在TMDB的集数信息: {filted_episodes}")
                     if not filted_episodes:
@@ -895,7 +907,8 @@ class GetMissingEpisodes(_PluginBase):
             "save_path_replaces": "\n".join(map(str, self._save_path_replaces)),
             "whitelist_librarys": self._whitelist_librarys,
             "whitelist_media_servers": ",".join(self._whitelist_media_servers) if self._whitelist_media_servers else "",
-            "auto_skip_finished": self._auto_skip_finished,  # 新增
+            "auto_skip_finished": self._auto_skip_finished,
+            "include_s00_season": self._include_s00_season,  # 新增
         }
         logger.info(f"更新配置 {config}")
         self.update_config(config)
@@ -1275,6 +1288,20 @@ class GetMissingEpisodes(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
+                                            "model": "include_s00_season",
+                                            "label": "包含S00季检测",
+                                            "hint": "开启：S00季（特别季/特典季）纳入缺失检测；关闭：跳过S00季检测",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
                                             "model": "clear",
                                             "label": "清理检查记录",
                                         },
@@ -1432,6 +1459,7 @@ class GetMissingEpisodes(_PluginBase):
             "only_season_exist": True,
             "only_aired": True,
             "auto_skip_finished": False,  # 新增
+            "include_s00_season": False,  # 新增：默认关闭
             "clear": False,
             "no_exist_action": NoExistAction.ONLY_HISTORY.value,
             "save_path_replaces": "",
