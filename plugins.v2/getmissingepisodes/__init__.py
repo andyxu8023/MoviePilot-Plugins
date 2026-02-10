@@ -854,7 +854,7 @@ class GetMissingEpisodes(_PluginBase):
 
         for episode in episodes_info:
             if episode:
-                episode_name = f"【{title}】第 {season}季 第{episode.episode_number}集 {episode.name}"
+                episode_name = f"【{title}】第 {season}季 {episode.name}"
                 
                 # 如果有播出日期
                 if episode.air_date:
