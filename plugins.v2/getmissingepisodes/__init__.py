@@ -713,7 +713,7 @@ class GetMissingEpisodes(_PluginBase):
                         logger.debug(f"【{title}】跳过S00季检测")
                         continue
                         
-                    filted_episodes = self.__filter_episodes(tmdbid, season)
+                    filted_episodes = self.__filter_episodes(tmdbid, season, title)
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
                         continue
@@ -741,7 +741,7 @@ class GetMissingEpisodes(_PluginBase):
                         logger.debug(f"【{title}】跳过S00季检测")
                         continue
                     
-                    filted_episodes = self.__filter_episodes(tmdbid, season)
+                    filted_episodes = self.__filter_episodes(tmdbid, season, title)
                     logger.debug(f"【{title}】第【{season}】季在TMDB的集数信息: {filted_episodes}")
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
@@ -836,7 +836,7 @@ class GetMissingEpisodes(_PluginBase):
         # 默认返回原始状态
         return status
 
-    def __filter_episodes(self, tmdbid, season):
+    def __filter_episodes(self, tmdbid, season, title):
         """筛选剧集"""
         try:
             episodes_info = self._tmdbChain.tmdb_episodes(tmdbid=tmdbid, season=season)
@@ -854,7 +854,7 @@ class GetMissingEpisodes(_PluginBase):
 
         for episode in episodes_info:
             if episode:
-                episode_name = f"【TMDBID: {tmdbid}】第 {season}季 {episode.name}"
+                episode_name = f"【{title}】第 {season}季 第{episode.episode_number}集 {episode.name}"
                 
                 # 如果有播出日期
                 if episode.air_date:
@@ -865,7 +865,7 @@ class GetMissingEpisodes(_PluginBase):
                             if air_date <= current_date:
                                 episodes.append(episode.episode_number)
                             else:
-                                logger.info(f"{episode_name} air_date: {episode.air_date} 发布时间比现在晚，未开播，不添加进集统计")
+                                logger.info(f"{episode_name} 发布时间: {episode.air_date} 未开播，不添加进集统计")
                         else:
                             # 全部：包括所有剧集，无论是否开播
                             episodes.append(episode.episode_number)
@@ -875,7 +875,7 @@ class GetMissingEpisodes(_PluginBase):
                             episodes.append(episode.episode_number)
                 else:
                     # 没有播出日期，视为未开播
-                    logger.info(f"{episode_name} 没有播出日期信息，视为未开播")
+                    logger.info(f"{episode_name} 没有播出日期信息，视为未开播，不添加进集统计")
                     if not self._only_aired:
                         episodes.append(episode.episode_number)
 
