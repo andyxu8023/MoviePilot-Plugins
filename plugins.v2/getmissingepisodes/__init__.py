@@ -745,9 +745,6 @@ class GetMissingEpisodes(_PluginBase):
                     logger.debug(f"【{title}】第【{season}】季在TMDB的集数信息: {filted_episodes}")
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
-                        # 新增：记录为什么没有获取到集数信息
-                        if self._only_aired:
-                            logger.info(f"【{title}】第【{season}】季所有剧集均未开播，因此没有可订阅的集数")
                         continue
                         
                     # 该季总集数（筛选后的）
@@ -855,9 +852,6 @@ class GetMissingEpisodes(_PluginBase):
             current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
             current_date = current_time.date()
 
-        # 记录未开播的剧集信息
-        unaired_episodes = []
-        
         for episode in episodes_info:
             if episode:
                 episode_name = f"【TMDBID: {tmdbid}】第 {season}季 {episode.name}"
@@ -871,11 +865,6 @@ class GetMissingEpisodes(_PluginBase):
                             if air_date <= current_date:
                                 episodes.append(episode.episode_number)
                             else:
-                                unaired_episodes.append({
-                                    "episode": episode.episode_number,
-                                    "name": episode.name,
-                                    "air_date": episode.air_date
-                                })
                                 logger.debug(f"{episode_name} air_date: {episode.air_date} 发布时间比现在晚, 不添加进集统计")
                         else:
                             # 全部：包括所有剧集，无论是否开播
@@ -886,21 +875,9 @@ class GetMissingEpisodes(_PluginBase):
                             episodes.append(episode.episode_number)
                 else:
                     # 没有播出日期，视为未开播
-                    unaired_episodes.append({
-                        "episode": episode.episode_number,
-                        "name": episode.name,
-                        "air_date": "未知"
-                    })
                     logger.debug(f"{episode_name} 没有播出日期信息")
                     if not self._only_aired:
                         episodes.append(episode.episode_number)
-        
-        # 如果有未开播的剧集，记录详细信息
-        if unaired_episodes and self._only_aired:
-        unaired_count = len(unaired_episodes)
-        logger.info(f"【TMDBID: {tmdbid}】第 {season}季 有 {unaired_count} 集未开播:")
-        for unaired in unaired_episodes:
-            logger.info(f"  第 {unaired['episode']} 集: {unaired['name']} (播出日期: {unaired['air_date']})")
 
         logger.debug(f"筛选后的集数: {episodes}")
         return episodes
