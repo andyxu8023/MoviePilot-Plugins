@@ -37,7 +37,7 @@ class HistoryDataType(Enum):
     LATEST = "最近记录"
     NOT_ALL_NO_EXIST = "已有季缺失"
     SKIPPED = "已跳过记录"
-    FINISHED = "已完结"  # 新增：已完结记录
+    FINISHED = "已完结"
 
 
 class NoExistAction(Enum):
@@ -55,14 +55,14 @@ class Icons(Enum):
     TARGET = "icon_target"
     SKIP = "icon_skip"
     RECENT = "icon_recent"
-    FINISHED = "icon_finished"  # 新增：已完结图标
+    FINISHED = "icon_finished"
 
 
 class GetMissingEpisodesInfo(TypedDict, total=False):
     season: Optional[int]
     episode_no_exist: Optional[List[int]]
-    episode_total: int  # 筛选后的总集数（用于检查）
-    episode_total_unfiltered: int  # 实际总集数（用于订阅）
+    episode_total: int
+    episode_total_unfiltered: int
 
 
 class TvNoExistInfo(TypedDict):
@@ -74,8 +74,8 @@ class TvNoExistInfo(TypedDict):
     vote_average: float | str
     last_air_date: str
     season_episode_no_exist_info: Dict[str, GetMissingEpisodesInfo]
-    status: str  # 新增：剧集状态
-    status_cn: str  # 新增：剧集状态中文
+    status: str
+    status_cn: str
 
 
 default_poster_path = "/assets/no-image-CweBJ8Ee.jpeg"
@@ -90,8 +90,8 @@ def create_tv_no_exist_info(
     vote_average=0.0,
     poster_path=default_poster_path,
     season_episode_no_exist_info: Optional[Dict[str, GetMissingEpisodesInfo]] = None,
-    status: str = "Unknown",  # 新增：剧集状态
-    status_cn: str = "未知",  # 新增：剧集状态中文
+    status: str = "Unknown",
+    status_cn: str = "未知",
 ) -> TvNoExistInfo:
     logger.debug(f"season_episode_no_exist_info: {season_episode_no_exist_info}")
     return TvNoExistInfo(
@@ -103,18 +103,18 @@ def create_tv_no_exist_info(
         vote_average=vote_average,
         last_air_date=last_air_date,
         season_episode_no_exist_info=season_episode_no_exist_info or {},
-        status=status,  # 新增
-        status_cn=status_cn,  # 新增
+        status=status,
+        status_cn=status_cn,
     )
 
 
 class HistoryDetail(TypedDict):
     exist_status: Optional[str]
     tv_no_exist_info: Optional[TvNoExistInfo]
-    last_check: Optional[str]  # 改为最后检查时间
-    last_check_full: Optional[str]  # 改为最后检查时间（完整格式）
-    first_found_time: Optional[str]  # 新增：首次发现时间
-    last_status_change: Optional[str]  # 新增：最后状态变更时间
+    last_check: Optional[str]
+    last_check_full: Optional[str]
+    first_found_time: Optional[str]
+    last_status_change: Optional[str]
     skip: Optional[bool]
 
 
@@ -128,7 +128,7 @@ class History(TypedDict):
 
 class SVGPaths:
     """SVG图标路径统一管理"""
-    
+
     @staticmethod
     def get_paths(icon_name: Icons) -> List[str]:
         """获取指定图标的SVG路径"""
@@ -143,10 +143,10 @@ class SVGPaths:
                 "M300.612267 265.796267a34.133333 34.133333 0 0 0 34.133333-34.133334V128a34.133333 34.133333 0 1 0-68.266667 0v103.6288a34.133333 34.133333 0 0 0 34.133334 34.133333zM723.3536 265.796267a34.133333 34.133333 0 0 0 34.133333-34.133334V128a34.133333 34.133333 0 1 0-68.266666 0v103.6288a34.133333 34.133333 0 0 0 34.133333 34.133333z",
             ],
             Icons.BUG_REMOVE: [
-                "M945.000296 566.802963c-25.486222-68.608-91.211852-79.530667-144.19437-72.855704a464.402963 464.402963 0 0 0-29.316741-101.148444c20.366222-8.343704 48.279704-12.136296 70.731852 14.487704a37.925926 37.925926 0 0 0 57.912889-49.000297c-51.655111-61.060741-117.94963-53.589333-164.636445-32.426666a333.482667 333.482667 0 0 0-72.021333-78.696297c2.654815-11.377778 4.399407-23.021037 4.399408-35.157333 0-19.683556-4.020148-38.305185-10.695112-55.675259 10.467556-10.960593 30.644148-25.979259 61.705482-23.058963a37.660444 37.660444 0 0 0 41.339259-34.17126 37.925926 37.925926 0 0 0-34.133333-41.339259 145.294222 145.294222 0 0 0-113.246815 36.560593A153.182815 153.182815 0 0 0 513.137778 56.888889c-36.408889 0-69.404444 13.160296-95.876741 34.285037a145.59763 145.59763 0 0 0-109.37837-33.450667 37.925926 37.925926 0 1 0 7.205926 75.548445 73.007407 73.007407 0 0 1 55.902814 17.597629A154.737778 154.737778 0 0 0 358.4 212.005926c0 12.212148 1.782519 23.969185 4.475259 35.384889A334.051556 334.051556 0 0 0 290.512593 326.807704c-46.800593-21.845333-114.194963-30.492444-166.646519 31.478518a37.925926 37.925926 0 0 0 57.912889 49.000297c23.134815-27.382519 52.261926-22.641778 72.969481-13.615408a464.213333 464.213333 0 0 0-28.975407 100.655408c-53.475556-7.395556-120.832 2.768593-146.773333 72.438518a37.925926 37.925926 0 1 0 71.111111 26.43437c10.24-27.534222 44.259556-27.230815 68.532148-23.134814-0.644741 33.374815 1.137778 64.891259 9.253926 106.192592-38.456889 10.884741-81.768296 39.405037-101.793185 103.461926a37.925926 37.925926 0 0 0 72.438518 22.603852c11.150222-35.65037 32.768-48.810667 49.682963-53.551407 47.900444 129.024 148.555852 218.339556 265.102222 218.339555 116.280889 0 216.746667-88.936296 264.798815-217.467259 16.535704 5.271704 36.712296 18.659556 47.369482 52.679111a37.888 37.888 0 1 0 72.400592-22.603852c-19.569778-62.691556-61.44-91.401481-99.252148-102.779259 8.305778-42.059852 10.012444-73.500444 9.367704-107.254519 24.007111-3.678815 55.978667-3.109926 65.877333 23.514074a37.925926 37.925926 0 1 0 71.111111-26.396444z m-321.308444 69.973333c14.791111 14.791111 14.791111 39.063704 0 53.854815a38.039704 38.039704 0 0 1-53.475556 0l-56.888889-56.888889-56.888888 56.888889a38.456889 38.456889 0 0 1-53.854815 0c-14.791111-14.791111-14.791111-39.063704 0-53.854815l56.888889-56.888889-56.888889-56.888888a37.774222 37.774222 0 0 1 0-53.475556c14.791111-14.791111 39.063704-14.791111 53.854815 0l56.888888 56.888889 56.888889-56.888889a37.774222 37.774222 0 0 1 53.475556 0c14.791111 14.791111 14.791111 38.684444 0 53.475556l-56.888889 56.888888 56.888889 56.888889z"
+                "M945.000296 566.802963c-25.486222-68.608-91.211852-79.530667-144.19437-72.855704a464.402963 464.402963 0 0 0-29.316741-101.148444c20.366222-8.343704 48.279704-12.136296 70.731852 14.487704a37.925926 37.925926 0 0 0 57.912889-49.000297c-51.655111-61.060741-117.94963-53.589333-164.636445-32.426666a333.482667 333.482667 0 0 0-72.021333-78.696297c2.654815-11.377778 4.399407-23.021037 4.399408-35.157333 0-19.683556-4.020148-38.305185-10.695112-55.675259 10.467556-10.960593 30.644148-25.979259 61.705482-23.058963a37.660444 37.660444 0 0 0 41.339259-34.17126 37.925926 37.925926 0 0 0-34.133333-41.339259 145.294222 145.294222 0 0 0-113.246815 36.560593A153.182815 153.182815 0 0 0 513.137778 56.888889c-36.408889 0-69.404444 13.160296-95.876741 34.285037a145.59763 145.59763 0 0 0-109.37837-33.450667 37.925926 37.925926 0 1 0 7.205926 75.548445 73.007407 73.007407 0 0 1 55.902814 17.597629A154.737778 154.737778 0 0 0 358.4 212.005926c0 12.212148 1.782519 23.969185 4.475259 35.384889A334.051556 334.051556 0 0 0 290.512593 326.807704c-46.800593-21.845333-114.194963-30.492444-166.646519 31.478518a37.925926 37.925926 0 0 0 57.912889 49.000297c23.134815-27.382519 52.261926-22.641778 72.969481-13.615408a464.213333 464.213333 0 0 0-28.975407 100.655408c-53.475556-7.395556-120.832 2.768593-146.773333 72.438518a37.925926 37.925926 0 1 0 71.111111 26.43437c10.24-27.534222 44.259556-27.230815 68.532148-23.134814-0.644741 33.374815 1.137778 64.891259 9.253926 106.192592-38.456889 10.884741-81.768296 39.405037-101.793185 103.461926a37.925926 37.925926 0 0 0 72.438518 22.603852c11.150222-35.65037 32.768-48.810667 49.682963-53.551407 47.900444 129.024 148.555852 218.339556 265.102222 218.339555 116.280889 0 216.746667-88.936296 264.798815-217.467259 16.535704 5.271704 36.712296 18.659556 47.369482 52.679111a37.888 37.888 0 1 0 72.400592-22.603852c-19.569778-62.691556-61.44-91.401481-99.252148-102.779259 8.305778-42.059852 10.012444-73.500444 9.367704-107.254519 24.007111-3.678815 55.978667-3.109926 65.877333 23.514074a37.925926 37.925926 0 1 0 71.111111-26.396444z m-321.308444 69.973333c14.791111 14.791111 14.791111 39.063704 0 53.854815a38.039704 38.039704 0 0 1-53.475556 0l-56.888889-56.888889-56.888888 56.888889a38.456889 38.456889 0 0 1-53.854815 0c-14.791111-14.791111-14.791111-39.063704 0-53.854815l56.888889-56.888889-56.888889-56.888888a37.774222 37.774222 0 0 1 0-53.475556c14.791111-14.791111 39.063704-14.791111 53.854815 0l56.888888 56.888889 56.888889-56.888889a37.774222 37.774222 0 0 1 53.475556 0c14.791111 14.791111 14.791111 38.684444 0 53.475556l-56.888889 56.888888 56.888889 56.888889z",
             ],
             Icons.WARNING: [
-                "M965.316923 727.276308l-319.015385-578.953846c-58.171077-106.299077-210.944-106.023385-268.996923 0l-318.621538 579.347692c-56.359385 102.636308 18.116923 227.643077 134.695385 227.643077h637.243076c116.184615 0 191.172923-124.416 134.695385-228.036923z m-453.316923 26.781538c-24.812308 0-44.504615-20.086154-44.504615-44.504615 0-24.812308 19.692308-44.898462 44.504615-44.898462a44.701538 44.701538 0 0 1 0 89.403077z m57.501538-361.156923l-20.873846 170.929231c-1.575385 19.298462-17.329231 33.870769-36.627692 33.870769s-35.446154-14.572308-37.021538-33.870769l-20.48-170.929231c-3.150769-33.870769 23.630769-63.015385 57.501538-63.015385 29.932308 0 57.501538 21.582769 57.501538 63.015385z"
+                "M965.316923 727.276308l-319.015385-578.953846c-58.171077-106.299077-210.944-106.023385-268.996923 0l-318.621538 579.347692c-56.359385 102.636308 18.116923 227.643077 134.695385 227.643077h637.243076c116.184615 0 191.172923-124.416 134.695385-228.036923z m-453.316923 26.781538c-24.812308 0-44.504615-20.086154-44.504615-44.504615 0-24.812308 19.692308-44.898462 44.504615-44.898462a44.701538 44.701538 0 0 1 0 89.403077z m57.501538-361.156923l-20.873846 170.929231c-1.575385 19.298462-17.329231 33.870769-36.627692 33.870769s-35.446154-14.572308-37.021538-33.870769l-20.48-170.929231c-3.150769-33.870769 23.630769-63.015385 57.501538-63.015385 29.932308 0 57.501538 21.582769 57.501538 63.015385z",
             ],
             Icons.GLASSES: [
                 "M1028.096 503.808L815.104 204.8c-8.192-12.288-20.48-16.384-32.768-16.384h-126.976c-24.576 0-40.96 20.48-40.96 40.96 0 24.576 20.48 40.96 40.96 40.96h102.4l131.072 184.32H143.36l135.168-188.416h102.4c24.576 0 40.96-16.384 40.96-40.96s-16.384-40.96-40.96-40.96H253.952c-16.384 0-24.576 8.192-32.768 16.384L8.192 499.712c0 8.192-8.192 32.768-8.192 53.248v188.416c0 53.248 45.056 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416-12.288h122.88V741.376c0 53.248 40.96 94.208 98.304 94.208h266.24c53.248 0 94.208-40.96 94.208-94.208v-188.416c0-16.384-8.192-40.96-12.288-49.152zM376.832 716.8c0 20.48-16.384 40.96-40.96 40.96H122.88c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96H335.872c24.576 0 40.96 16.384 40.96 40.96v135.168z m581.632 0c0 20.48-16.384 40.96-40.96 40.96H704.512c-20.48 0-40.96-20.48-40.96-40.96v-135.168c0-24.576 20.48-40.96 40.96-40.96h212.992c24.576 0 40.96 16.384 40.96 40.96v135.168z",
@@ -163,7 +163,7 @@ class SVGPaths:
                 "M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z",
                 "M686.7 638.6L544.1 535.5V288c0-4.4-3.6-8-8-8H488c-4.4 0-8 3.6-8 8v275.4c0 2.8 1.5 5.5 4 6.9l165.4 120.6c3.2 2.3 7.6 2.1 10.6-.5l39.4-39.4c2.8-2.8 3-7.3.6-10.4z",
             ],
-            Icons.FINISHED: [  # 新增：已完结图标
+            Icons.FINISHED: [
                 "M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372 372 166.6 372 372-166.6 372-372 372z",
                 "M378.6 567.4l-98.2-98.2c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l120.8 120.8c12.5 12.5 32.8 12.5 45.3 0l264.8-264.8c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L378.6 567.4z",
             ],
@@ -173,9 +173,9 @@ class SVGPaths:
 
 class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集补全&新季追更"
-    plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
+    plugin_desc = "检测指定剧集库，对新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "2.2.5"  # 更新版本号
+    plugin_version = "2.2.5"
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -185,7 +185,6 @@ class GetMissingEpisodes(_PluginBase):
     _event = Event()
     _lock = Lock()
 
-    # 私有属性
     _subChain: SubscribeChain
     _subOper: SubscribeOper
     _mediaChain: MediaChain
@@ -195,7 +194,6 @@ class GetMissingEpisodes(_PluginBase):
     _plugin_id = "GetMissingEpisodes"
     _scheduler = None
 
-    # 配置属性
     _enabled: bool = False
     _cron: str = ""
     _onlyonce: bool = False
@@ -208,8 +206,8 @@ class GetMissingEpisodes(_PluginBase):
     _whitelist_librarys: List[str] = []
     _whitelist_media_servers: List[str] = []
     _current_history_type: str = HistoryDataType.LATEST.value
-    _auto_skip_finished: bool = False  # 新增：自动跳过已完结剧集
-    _include_s00_season: bool = False  # 新增：是否包含S00季检测
+    _auto_skip_finished: bool = False
+    _include_s00_season: bool = False
 
     def init_plugin(self, config: dict[str, Any] | None = None):
         """初始化插件"""
@@ -224,15 +222,12 @@ class GetMissingEpisodes(_PluginBase):
             if config:
                 self._load_config(config)
 
-            # 从存储中读取当前选中的历史数据类型
             saved_type = self.get_data("current_history_type")
             if saved_type:
                 self._current_history_type = saved_type
 
-            # 停止现有任务
             self.stop_service()
 
-            # 启动服务
             if self._enabled or self._onlyonce:
                 self._start_service()
 
@@ -249,23 +244,20 @@ class GetMissingEpisodes(_PluginBase):
         self._only_season_exist = config.get("only_season_exist", True)
         self._only_aired = config.get("only_aired", True)
         self._no_exist_action = config.get("no_exist_action", NoExistAction.ONLY_HISTORY.value)
-        self._auto_skip_finished = config.get("auto_skip_finished", False)  # 新增
-        self._include_s00_season = config.get("include_s00_season", False)  # 新增：加载S00季配置
+        self._auto_skip_finished = config.get("auto_skip_finished", False)
+        self._include_s00_season = config.get("include_s00_season", False)
 
-        # 处理保存路径替换
         _save_path_replaces = config.get("save_path_replaces", "")
         if _save_path_replaces and isinstance(_save_path_replaces, str):
             self._save_path_replaces = [line.strip() for line in _save_path_replaces.split("\n") if line.strip()]
         else:
             self._save_path_replaces = []
 
-        # 处理媒体库白名单
         self._whitelist_librarys = self._parse_list_config(
-            config.get("whitelist_librarys", []), 
+            config.get("whitelist_librarys", []),
             default=[]
         )
 
-        # 处理媒体服务器白名单
         self._whitelist_media_servers = self._parse_list_config(
             config.get("whitelist_media_servers", ""),
             default=[]
@@ -275,7 +267,7 @@ class GetMissingEpisodes(_PluginBase):
         """解析列表配置，支持字符串和列表格式"""
         if default is None:
             default = []
-        
+
         if isinstance(config_value, str):
             if config_value:
                 return [item.strip() for item in config_value.split(",") if item.strip()]
@@ -302,12 +294,9 @@ class GetMissingEpisodes(_PluginBase):
                 self._scheduler.start()
 
         if self._onlyonce or self._clear:
-            # 记录缓存清理标志
             self._clearflag = self._clear
-            # 关闭清理缓存和一次性开关
             self._clear = False
             self._onlyonce = False
-            # 保存配置
             self._update_config()
 
     def get_state(self) -> bool:
@@ -392,10 +381,9 @@ class GetMissingEpisodes(_PluginBase):
             return []
 
     def __get_mediaserver_tv_info(self) -> None:
-        """获取媒体库电视剧数据"""
+        """获取媒体库电视剧数据，并自动清理已删除剧集的记录"""
         logger.info("开始获取媒体库电视剧数据 ...")
-        
-        # 清理检查记录
+
         if self._clearflag:
             logger.info("清理检查记录")
             self.save_data("history", "")
@@ -405,46 +393,42 @@ class GetMissingEpisodes(_PluginBase):
             history = self.get_data("history")
 
         history_data: Dict[str, Any] = history if history else {"details": {}}
+        # 收集本次扫描中所有出现的唯一标识
+        existing_flags = set()
 
-        # 添加检查记录
         def __append_history(
             item_unique_flag: str,
             exist_status: HistoryStatus,
             tv_no_exist_info: TvNoExistInfo | Dict[str, Any] | None = None,
         ):
+            nonlocal history_data, existing_flags
             with self._lock:
                 current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
                 current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # 检查是否已有记录
                 existing_record = history_data["details"].get(item_unique_flag)
-                
-                # 检查是否需要自动跳过已完结剧集
+
                 auto_skip = False
                 if self._auto_skip_finished and tv_no_exist_info:
                     status_cn = tv_no_exist_info.get("status_cn", "")
                     if status_cn == "已完结":
                         auto_skip = True
                         logger.info(f"【{tv_no_exist_info.get('title', '未知')}】已完结，自动标记为跳过")
-                
+
                 if existing_record:
-                    # 已有记录，检查状态是否变化
                     existing_skip = existing_record.get("skip", False)
                     first_found_time = existing_record.get("first_found_time", existing_record.get("last_check_full", current_time_str))
                     previous_status = existing_record.get("exist_status")
-                    
-                    # 判断状态是否变化
+
                     status_changed = previous_status != exist_status.value
-                    
-                    # 如果状态变化，更新最后状态变更时间，否则保持不变
+
                     if status_changed:
                         last_status_change = current_time_str
                     else:
                         last_status_change = existing_record.get("last_status_change", existing_record.get("last_check_full", current_time_str))
-                    
-                    # 如果自动跳过，更新skip状态
+
                     final_skip = existing_skip or auto_skip
-                    
+
                     history_data["details"][item_unique_flag] = {
                         "exist_status": exist_status.value,
                         "tv_no_exist_info": tv_no_exist_info if tv_no_exist_info else existing_record.get("tv_no_exist_info"),
@@ -455,17 +439,19 @@ class GetMissingEpisodes(_PluginBase):
                         "skip": final_skip,
                     }
                 else:
-                    # 新记录
                     history_data["details"][item_unique_flag] = {
                         "exist_status": exist_status.value,
                         "tv_no_exist_info": tv_no_exist_info,
                         "last_check": current_time.strftime("%m-%d %H:%M"),
                         "last_check_full": current_time_str,
                         "first_found_time": current_time_str,
-                        "last_status_change": current_time_str,  # 新记录的状态变更时间就是发现时间
-                        "skip": auto_skip,  # 如果是已完结且开启自动跳过，则自动跳过
+                        "last_status_change": current_time_str,
+                        "skip": auto_skip,
                     }
-                
+
+                # 记录该唯一标识在本次扫描中出现
+                existing_flags.add(item_unique_flag)
+
                 logger.debug(f"添加/更新检查记录: {item_unique_flag}, 状态: {exist_status.value}")
                 self.save_data("history", history_data)
 
@@ -480,16 +466,14 @@ class GetMissingEpisodes(_PluginBase):
         details = history_data.get("details", {})
         logger.debug(f"历史记录数量: {len(details)}")
 
-        # 遍历媒体服务器
         for mediaserver in mediaservers:
             if not mediaserver:
                 continue
-                
-            # 检查媒体服务器白名单（修复：只有当白名单非空时才检查）
+
             if self._whitelist_media_servers and mediaserver not in self._whitelist_media_servers:
                 logger.info(f"【{mediaserver}】不在媒体服务器名称白名单内, 跳过")
                 continue
-                
+
             logger.info(f"开始获取媒体库 {mediaserver} 的数据 ...")
 
             item_count = 0
@@ -500,11 +484,10 @@ class GetMissingEpisodes(_PluginBase):
                 continue
 
             for library in librarys:
-                # 检查媒体库白名单（修复：只有当白名单非空时才检查）
                 if self._whitelist_librarys and library.name not in self._whitelist_librarys:
                     logger.debug(f"媒体库 {library.name} 不在白名单内，跳过")
                     continue
-                    
+
                 logger.info(f"正在获取 {mediaserver} 媒体库 {library.name} ...")
 
                 if not library.id:
@@ -531,20 +514,17 @@ class GetMissingEpisodes(_PluginBase):
                     item_title = item.title or item.original_title or f"ItemID: {item.item_id}"
                     item_unique_flag = f"{mediaserver}_{item.library}_{item.item_id}_{item_title}"
 
-                    # 检查是否被标记为跳过
                     if item_unique_flag in details and details[item_unique_flag].get("skip", False):
                         logger.info(f"【{item_title}】已被标记为跳过, 跳过检测")
                         continue
 
                     logger.info(f"正在获取 {item_title} ...")
 
-                    # 检查媒体类型
                     item_type = MediaType.TV.value if item.item_type in ["Series", "show"] else MediaType.MOVIE.value
                     if item_type == MediaType.MOVIE.value:
                         logger.warning(f"【{item_title}】为{MediaType.MOVIE.value}, 跳过")
                         continue
 
-                    # 获取季信息
                     seasoninfo = {}
                     if item_type == MediaType.TV.value and item.tmdbid:
                         try:
@@ -554,16 +534,13 @@ class GetMissingEpisodes(_PluginBase):
                         except Exception as e:
                             logger.error(f"获取剧集信息失败: {str(e)}")
 
-                    # 准备数据
                     item_dict = item.dict()
                     item_dict["seasoninfo"] = seasoninfo
                     item_dict["item_type"] = item_type
                     logger.debug(f"获到媒体库【{item_title}】数据：{item_dict}")
 
-                    # 获取缺失集数信息
                     is_add_subscribe_success, tv_no_exist_info = self.__get_item_no_exist_info(item_dict)
 
-                    # 处理结果
                     if is_add_subscribe_success and tv_no_exist_info:
                         if not tv_no_exist_info.get("season_episode_no_exist_info"):
                             logger.info(f"【{item_title}】所有季集均已存在/订阅")
@@ -619,6 +596,18 @@ class GetMissingEpisodes(_PluginBase):
 
         logger.info(f"媒体库缺失集数据获取完成, 已处理媒体数量: {item_count}")
 
+        # ============ 自动清理已删除剧集的记录 ============
+        with self._lock:
+            # 重新获取一次最新数据，避免在循环中外部修改（实际上 __append_history 每次都会保存，这里直接使用 history_data 即可）
+            to_delete = [key for key in history_data["details"].keys() if key not in existing_flags]
+            if to_delete:
+                for key in to_delete:
+                    del history_data["details"][key]
+                logger.info(f"已自动清理 {len(to_delete)} 条已删除剧集的记录")
+                self.save_data("history", history_data)
+            else:
+                logger.debug("本次扫描无需要清理的记录")
+
     def __get_item_no_exist_info(
         self, item_dict: dict[str, Any]
     ) -> tuple[bool, TvNoExistInfo]:
@@ -643,28 +632,25 @@ class GetMissingEpisodes(_PluginBase):
             logger.debug(f"【{title}】媒体类型不为电视剧, 跳过获取缺失集数")
             return False, tv_no_exist_info
 
-        # 添加不存在的季集信息
         def __append_season_info(
             season: int,
             episode_no_exist: List[int],
             episode_total: int,
-            episode_total_unfiltered: int,  # 新增参数：实际总集数
+            episode_total_unfiltered: int,
         ):
             logger.debug(f"添加【{title}】第【{season}】季缺失集：{episode_no_exist}")
             season_info: GetMissingEpisodesInfo = {
                 "season": season,
                 "episode_no_exist": episode_no_exist,
-                "episode_total": episode_total,  # 筛选后的总集数
-                "episode_total_unfiltered": episode_total_unfiltered,  # 实际总集数
+                "episode_total": episode_total,
+                "episode_total_unfiltered": episode_total_unfiltered,
             }
-            
             tv_no_exist_info["season_episode_no_exist_info"][str(season)] = season_info
             logger.debug(f"【{title}】缺失季集数的电视剧信息：{tv_no_exist_info}")
 
         exist_season_info = item_dict.get("seasoninfo") or {}
         logger.debug(f"【{title}】在媒体库已有季集信息：{exist_season_info}")
 
-        # 获取媒体信息
         try:
             tmdbinfo = self._mediaChain.recognize_media(
                 mtype=MediaType.TV,
@@ -675,10 +661,9 @@ class GetMissingEpisodes(_PluginBase):
             return False, tv_no_exist_info
 
         if tmdbinfo:
-            # 获取剧集状态并转换为中文
             status = getattr(tmdbinfo, 'status', 'Unknown')
             status_cn = self.__convert_status_to_cn(status)
-            
+
             tv_no_exist_info["poster_path"] = (
                 tmdbinfo.poster_path
                 or tv_no_exist_info.get("poster_path", default_poster_path)
@@ -691,14 +676,13 @@ class GetMissingEpisodes(_PluginBase):
                 tmdbinfo.last_air_date
                 or tv_no_exist_info.get("last_air_date", "未知")
             )
-            tv_no_exist_info["status"] = status  # 存储原始状态
-            tv_no_exist_info["status_cn"] = status_cn  # 存储中文状态
+            tv_no_exist_info["status"] = status
+            tv_no_exist_info["status_cn"] = status_cn
 
-            # 检查tmdbinfo.seasons是否存在
             if not getattr(tmdbinfo, 'seasons', None):
                 logger.debug(f"【{title}】未获取到TMDB季集信息, 跳过获取缺失集数")
                 return False, tv_no_exist_info
-            
+
             tmdbinfo_seasons = tmdbinfo.seasons.items()
             if not tmdbinfo_seasons:
                 logger.debug(f"【{title}】未获取到TMDB季集信息, 跳过获取缺失集数")
@@ -706,26 +690,22 @@ class GetMissingEpisodes(_PluginBase):
 
             if not exist_season_info and not self._only_season_exist:
                 logger.debug(f"【{title}】全部季不存在, 添加全部季集数")
-                # 全部季不存在
                 for season, _ in tmdbinfo_seasons:
-                    # 新增：检查是否跳过S00季
                     if season == 0 and not self._include_s00_season:
                         logger.debug(f"【{title}】跳过S00季检测")
                         continue
-                        
+
                     filted_episodes = self.__filter_episodes(tmdbid, season, title)
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
                         continue
-                        
-                    # 判断用户是否已经添加订阅
+
                     if self._subOper.exists(tmdbid, None, season=season):
                         logger.info(f"【{title}】第【{season}】季已存在订阅, 跳过")
                         continue
-                    
-                    # 获取实际总集数
+
                     episode_total_unfiltered = self.__get_total_episodes_unfiltered(tmdbid, season)
-                        
+
                     __append_season_info(
                         season=season,
                         episode_no_exist=[],
@@ -734,44 +714,35 @@ class GetMissingEpisodes(_PluginBase):
                     )
             else:
                 logger.debug(f"【{title}】检查每季缺失的集")
-                # 检查每季缺失的季集
                 for season, _ in tmdbinfo_seasons:
-                    # 新增：检查是否跳过S00季
                     if season == 0 and not self._include_s00_season:
                         logger.debug(f"【{title}】跳过S00季检测")
                         continue
-                    
+
                     filted_episodes = self.__filter_episodes(tmdbid, season, title)
                     logger.debug(f"【{title}】第【{season}】季在TMDB的集数信息: {filted_episodes}")
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
                         continue
-                        
-                    # 该季总集数（筛选后的）
+
                     episode_total = len(filted_episodes)
-                    
-                    # 获取实际总集数
                     episode_total_unfiltered = self.__get_total_episodes_unfiltered(tmdbid, season)
 
-                    # 该季已存在的集
                     exist_episode = exist_season_info.get(season)
                     logger.debug(f"【{title}】第【{season}】季在媒体库已存在的集数信息: {exist_episode}")
-                    
-                    # 判断用户是否已经添加订阅
+
                     if self._subOper.exists(tmdbid, None, season=season):
                         logger.info(f"【{title}】第【{season}】季已存在订阅, 跳过")
                         continue
-                        
+
                     if exist_episode:
                         logger.debug(f"查找【{title}】第【{season}】季缺失集集数")
-                        # 按TMDB集数查找缺失集
                         lack_episode = list(set(filted_episodes).difference(set(exist_episode)))
 
                         if not lack_episode:
                             logger.debug(f"【{title}】第【{season}】季全部集存在")
                             continue
 
-                        # 添加不存在的季集信息
                         __append_season_info(
                             season=season,
                             episode_no_exist=lack_episode,
@@ -780,7 +751,6 @@ class GetMissingEpisodes(_PluginBase):
                         )
                     else:
                         logger.debug(f"【{title}】第【{season}】季全集不存在")
-                        # 该季全集不存在，选项仅检查已有季缺失未开启时添加全部集
                         if not self._only_season_exist:
                             __append_season_info(
                                 season=season,
@@ -791,15 +761,13 @@ class GetMissingEpisodes(_PluginBase):
 
             logger.debug(f"【{title}】季集信息: {tv_no_exist_info}")
 
-            # 存在不完整的剧集
             if tv_no_exist_info["season_episode_no_exist_info"]:
                 logger.debug("媒体库中已存在部分剧集")
                 return True, tv_no_exist_info
 
-            # 全部存在
             logger.debug(f"【{title}】所有季集均已存在/订阅")
             return True, tv_no_exist_info
-            
+
         else:
             logger.debug(f"【{title}】未获取到TMDB信息, 跳过获取缺失集数")
             return False, tv_no_exist_info
@@ -822,18 +790,15 @@ class GetMissingEpisodes(_PluginBase):
             'Unknown': '未知状态',
             '': '未知状态',
         }
-        
-        # 尝试直接匹配
+
         if status in status_mapping:
             return status_mapping[status]
-        
-        # 尝试模糊匹配
+
         status_lower = status.lower()
         for key, value in status_mapping.items():
             if key.lower() in status_lower or status_lower in key.lower():
                 return value
-        
-        # 默认返回原始状态
+
         return status
 
     def __filter_episodes(self, tmdbid, season, title):
@@ -845,8 +810,7 @@ class GetMissingEpisodes(_PluginBase):
             return []
 
         episodes = []
-        
-        # 如果需要检查播出时间，预先获取当前时间
+
         current_date = None
         if self._only_aired:
             current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
@@ -855,26 +819,22 @@ class GetMissingEpisodes(_PluginBase):
         for episode in episodes_info:
             if episode:
                 episode_name = f"【{title}】第 {season}季 {episode.name}"
-                
-                # 如果有播出日期
+
                 if episode.air_date:
                     try:
                         air_date = datetime.datetime.strptime(episode.air_date, "%Y-%m-%d").date()
                         if self._only_aired:
-                            # 仅已开播：只包括已开播的剧集
                             if air_date <= current_date:
                                 episodes.append(episode.episode_number)
                             else:
                                 logger.info(f"{episode_name} 发布时间: {episode.air_date} 未开播，不添加进集统计")
                         else:
-                            # 全部：包括所有剧集，无论是否开播
                             episodes.append(episode.episode_number)
                     except ValueError as e:
                         logger.warning(f"{episode_name} 播出日期格式错误: {episode.air_date}, 错误: {str(e)}")
                         if not self._only_aired:
                             episodes.append(episode.episode_number)
                 else:
-                    # 没有播出日期，视为未开播
                     logger.info(f"{episode_name} 没有播出日期信息，视为未开播，不添加进集统计")
                     if not self._only_aired:
                         episodes.append(episode.episode_number)
@@ -890,8 +850,6 @@ class GetMissingEpisodes(_PluginBase):
                 return len(episodes_info)
         except Exception as e:
             logger.error(f"获取TMDB实际总集数失败: {str(e)}")
-        
-        # 如果获取失败，返回0
         return 0
 
     def _update_config(self):
@@ -908,7 +866,7 @@ class GetMissingEpisodes(_PluginBase):
             "whitelist_librarys": self._whitelist_librarys,
             "whitelist_media_servers": ",".join(self._whitelist_media_servers) if self._whitelist_media_servers else "",
             "auto_skip_finished": self._auto_skip_finished,
-            "include_s00_season": self._include_s00_season,  # 新增
+            "include_s00_season": self._include_s00_season,
         }
         logger.info(f"更新配置 {config}")
         self.update_config(config)
@@ -944,7 +902,7 @@ class GetMissingEpisodes(_PluginBase):
         season: int,
         save_path: str | None = None,
         total_episode: int | None = None,
-        total_episode_unfiltered: int | None = None,  # 新增参数：实际总集数
+        total_episode_unfiltered: int | None = None,
     ):
         """检查并添加订阅"""
         title_season = f"{title} ({year}) 第 {season} 季"
@@ -958,13 +916,11 @@ class GetMissingEpisodes(_PluginBase):
                     continue
                 _lib_path_str, _save_path_str = replace_list[:2]
                 logger.debug(f"替换路径: {_lib_path_str} -> {_save_path_str}")
-                # 使用精确的路径前缀匹配
                 if save_path.startswith(_lib_path_str):
                     save_path_replaced = save_path.replace(_lib_path_str, _save_path_str, 1)
                     logger.info(f"{title_season} 的下载路径替换为: {save_path_replaced}")
                     break
 
-        # 判断用户是否已经添加订阅
         if self._subOper.exists(tmdbid, None, season=season):
             logger.info(f"{title_season} 订阅已存在")
             return True
@@ -978,10 +934,8 @@ class GetMissingEpisodes(_PluginBase):
                 logger.warning("season 无法转换为整数")
                 return False
 
-        # 优先使用实际总集数，如果未提供则使用筛选后的总集数
         final_total_episode = total_episode_unfiltered or total_episode
-        
-        # 添加订阅
+
         try:
             is_add_success, msg = self._subChain.add(
                 title=title,
@@ -992,7 +946,7 @@ class GetMissingEpisodes(_PluginBase):
                 exist_ok=True,
                 username=self.plugin_name,
                 save_path=save_path_replaced,
-                total_episode=final_total_episode,  # 使用实际总集数
+                total_episode=final_total_episode,
             )
             logger.debug(f"添加订阅 {title_season} 结果: {is_add_success}, {msg}")
             if not is_add_success:
@@ -1009,7 +963,6 @@ class GetMissingEpisodes(_PluginBase):
         """根据唯一标识更新存在状态"""
         if unique in historys["details"]:
             historys["details"][unique]["exist_status"] = new_status
-            # 状态变化时更新最后状态变更时间
             current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
             historys["details"][unique]["last_status_change"] = current_time.strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"更新检查记录 {unique} 状态为: {new_status}")
@@ -1038,7 +991,7 @@ class GetMissingEpisodes(_PluginBase):
             total_episode = season_info.get("episode_total") if season_info else None
             total_episode_unfiltered = season_info.get("episode_total_unfiltered") if season_info else None
             episode_no_exist = season_info.get("episode_no_exist") if season_info else None
-            
+
             if not episode_no_exist:
                 logger.info(f"【{title}】第 {season_key} 季所有集均缺失, 仅添加已有季选项为: {self._only_season_exist}")
                 if self._only_season_exist:
@@ -1049,7 +1002,6 @@ class GetMissingEpisodes(_PluginBase):
             else:
                 logger.info(f"【{title}】第 {season_key} 季缺失集数: {episode_no_exist}, 将添加订阅")
 
-            # 转换季节号为整数
             try:
                 season_int = int(season_key)
             except ValueError:
@@ -1095,7 +1047,7 @@ class GetMissingEpisodes(_PluginBase):
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
-            
+
         historys = self.get_data("history")
         if not historys:
             logger.warning("未找到检查记录")
@@ -1117,7 +1069,7 @@ class GetMissingEpisodes(_PluginBase):
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
-            
+
         historys = self.get_data("history")
         if not historys:
             logger.warning("未找到检查记录")
@@ -1138,7 +1090,7 @@ class GetMissingEpisodes(_PluginBase):
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
-            
+
         historys = self.get_data("history")
         if not historys:
             logger.warning("未找到检查记录")
@@ -1161,7 +1113,7 @@ class GetMissingEpisodes(_PluginBase):
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
-            
+
         historys = self.get_data("history")
         if not historys:
             logger.warning("未找到检查记录")
@@ -1170,7 +1122,6 @@ class GetMissingEpisodes(_PluginBase):
         if key in historys["details"]:
             current_skip = historys["details"][key].get("skip", False)
             historys["details"][key]["skip"] = not current_skip
-            # 跳过状态变化时也更新状态变更时间
             current_time = datetime.datetime.now(tz=pytz.timezone(settings.TZ))
             historys["details"][key]["last_status_change"] = current_time.strftime("%Y-%m-%d %H:%M:%S")
             self.save_data("history", historys)
@@ -1187,21 +1138,18 @@ class GetMissingEpisodes(_PluginBase):
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
-        
-        # 验证历史数据类型是否有效
+
         valid_types = [dt.value for dt in HistoryDataType]
         if history_type not in valid_types:
             logger.warning(f"无效的历史数据类型: {history_type}")
             return schemas.Response(success=False, message="无效的历史数据类型")
-        
-        # 保存当前选中的历史数据类型
+
         self._current_history_type = history_type
         self.save_data("current_history_type", history_type)
         logger.info(f"历史数据类型已设置为: {history_type}")
         return schemas.Response(success=True, message="设置成功")
 
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        # 获取所有可用的媒体库
         available_libraries = []
         try:
             mediaservers = self._msHelper.get_services()
@@ -1212,13 +1160,10 @@ class GetMissingEpisodes(_PluginBase):
                         available_libraries.append(library.name)
         except Exception as e:
             logger.error(f"获取媒体库列表失败: {str(e)}")
-        
-        # 去重并排序
+
         available_libraries = sorted(list(set(available_libraries)))
-        
-        # 构建媒体库选项
         library_items = [{"title": lib, "value": lib} for lib in available_libraries]
-        
+
         return [
             {
                 "component": "VForm",
@@ -1238,7 +1183,7 @@ class GetMissingEpisodes(_PluginBase):
                                         },
                                     }
                                 ],
-                            },                            
+                            },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
@@ -1320,7 +1265,7 @@ class GetMissingEpisodes(_PluginBase):
                                         },
                                     }
                                 ],
-                            },                   
+                            },
                         ],
                     },
                     {
@@ -1458,8 +1403,8 @@ class GetMissingEpisodes(_PluginBase):
             "onlyonce": False,
             "only_season_exist": True,
             "only_aired": True,
-            "auto_skip_finished": False,  # 新增
-            "include_s00_season": False,  # 新增：默认关闭
+            "auto_skip_finished": False,
+            "include_s00_season": False,
             "clear": False,
             "no_exist_action": NoExistAction.ONLY_HISTORY.value,
             "save_path_replaces": "",
@@ -1470,7 +1415,7 @@ class GetMissingEpisodes(_PluginBase):
     def __get_action_buttons_content(self, unique: str | None, status: str, skip: bool = False):
         if not unique:
             return []
-            
+
         action_buttons = {
             "add_subscribe_history": {
                 "component": "VBtn",
@@ -1594,7 +1539,7 @@ class GetMissingEpisodes(_PluginBase):
             return seasons_count, episodes_count
 
         history = history or {}
-        time_str = history.get("last_check")  # 改为显示最后检查时间
+        time_str = history.get("last_check")
         skip_status = history.get("skip", False)
 
         tv_no_exist_info: TvNoExistInfo = history.get("tv_no_exist_info") or {}
@@ -1605,7 +1550,7 @@ class GetMissingEpisodes(_PluginBase):
         vote = tv_no_exist_info.get("vote_average", 0.0)
         last_air_date = tv_no_exist_info.get("last_air_date", "未知")
         season_episode_no_exist_info = tv_no_exist_info.get("season_episode_no_exist_info", {})
-        status_cn = tv_no_exist_info.get("status_cn", "未知状态")  # 获取中文状态
+        status_cn = tv_no_exist_info.get("status_cn", "未知状态")
 
         season_no_exist_count, episode_no_exist_count = __count_seasons_episodes(season_episode_no_exist_info)
 
@@ -1613,8 +1558,7 @@ class GetMissingEpisodes(_PluginBase):
         status = _status
         if status == HistoryStatus.NO_EXIST.value:
             status = f"缺失{season_no_exist_count}季, {episode_no_exist_count}集"
-        
-        # 如果被跳过，在状态中显示
+
         if skip_status:
             status = f"{status}⏭️"
 
@@ -1639,7 +1583,7 @@ class GetMissingEpisodes(_PluginBase):
             "component": "VCard",
             "props": {
                 "variant": "tonal",
-                "style": "width: 320px; min-height: 240px;",  # 固定卡片大小
+                "style": "width: 320px; min-height: 240px;",
                 "class": "history-card",
             },
             "content": [
@@ -1664,14 +1608,14 @@ class GetMissingEpisodes(_PluginBase):
                             "component": "div",
                             "props": {
                                 "class": "flex flex-col",
-                                "style": "width: 160px;",  # 固定文字区域宽度
+                                "style": "width: 160px;",
                             },
                             "content": [
                                 {
                                     "component": "VCardTitle",
                                     "props": {
                                         "class": "pt-6 pl-4 pr-4 text-lg",
-                                        "style": "word-break: break-word; white-space: normal; line-height: 1.2;",  # 允许换行
+                                        "style": "word-break: break-word; white-space: normal; line-height: 1.2;",
                                     },
                                     "content": [
                                         {
@@ -1762,9 +1706,8 @@ class GetMissingEpisodes(_PluginBase):
             for history in historys:
                 posts_content.append(self.__get_history_post_content(history))
 
-        # 获取当前历史数据类型的显示名称
         history_type_display = self._current_history_type
-        
+
         component = {
             "component": "div",
             "content": [
@@ -1784,7 +1727,7 @@ class GetMissingEpisodes(_PluginBase):
                     "component": "div",
                     "props": {
                         "class": "flex flex-row flex-wrap gap-4 items-start justify-center",
-                        "style": "margin: 0 auto; max-width: 100%;",  # 确保容器适应
+                        "style": "margin: 0 auto; max-width: 100%;",
                     },
                     "content": posts_content,
                 },
@@ -1828,15 +1771,12 @@ class GetMissingEpisodes(_PluginBase):
     def __get_historys_statistic_content(
         title: str, value: str, icon_name: Icons, history_type: str, current_history_type: str
     ) -> dict[str, Any]:
-        # 根据是否选中来设置卡片样式和图标颜色
         is_selected = current_history_type == history_type
         card_color = "primary" if is_selected else "tonal"
         icon_color = "#1976d2" if is_selected else "#8a8a8a"
-        
-        # 获取图标路径
+
         paths = SVGPaths.get_paths(icon_name)
-        
-        # 创建SVG图标
+
         svg_content = {
             "component": "svg",
             "props": {
@@ -1847,14 +1787,13 @@ class GetMissingEpisodes(_PluginBase):
             },
             "content": []
         }
-        
-        # 添加路径
+
         for path in paths:
             svg_content["content"].append({
                 "component": "path",
                 "props": {"fill": icon_color, "d": path},
             })
-        
+
         total_elements = {
             "component": "VCard",
             "props": {
@@ -1921,14 +1860,12 @@ class GetMissingEpisodes(_PluginBase):
         historys_added_rss_total,
         history_not_all_no_exist_total,
         historys_skipped_total,
-        historys_finished_total,  # 新增：已完结统计
+        historys_finished_total,
     ):
-        # 从数据中获取当前选中的历史数据类型
         saved_history_type = self.get_data("current_history_type")
         if saved_history_type:
             self._current_history_type = saved_history_type
 
-        # 数据统计，每个统计项对应一个历史数据类型
         data_statistics = [
             {
                 "title": "最近处理",
@@ -1981,7 +1918,7 @@ class GetMissingEpisodes(_PluginBase):
             {
                 "title": "已完结",
                 "value": f"{historys_finished_total}部",
-                "icon_name": Icons.FINISHED,  # 使用新增的已完结图标
+                "icon_name": Icons.FINISHED,
                 "history_type": HistoryDataType.FINISHED.value,
             },
         ]
@@ -2008,7 +1945,6 @@ class GetMissingEpisodes(_PluginBase):
 
     def get_page(self) -> List[Dict[str, Any]]:
         """拼装插件详情页面, 需要返回页面配置, 同时附带数据"""
-        # 查询检查记录
         historys = self.get_data("history")
 
         if not historys:
@@ -2025,11 +1961,9 @@ class GetMissingEpisodes(_PluginBase):
         details = historys.get("details", {})
 
         def sort_by_last_status_change(history_list):
-            """按最后状态变更时间排序"""
             history_list.sort(key=lambda x: x.get("last_status_change", x.get("last_check_full", "")), reverse=True)
 
         def sort_by_last_check(history_list):
-            """按最后检查时间排序"""
             history_list.sort(key=lambda x: x.get("last_check_full", ""), reverse=True)
 
         history_failed: List[ExtendedHistoryDetail] = []
@@ -2038,9 +1972,8 @@ class GetMissingEpisodes(_PluginBase):
         history_no_exist: List[ExtendedHistoryDetail] = []
         history_all: List[ExtendedHistoryDetail] = []
         history_skipped: List[ExtendedHistoryDetail] = []
-        history_finished: List[ExtendedHistoryDetail] = []  # 新增：已完结记录
+        history_finished: List[ExtendedHistoryDetail] = []
 
-        # 字典将exist_status映射到相应的列表
         status_to_list = {
             HistoryStatus.FAILED.value: history_failed,
             HistoryStatus.ADDED_RSS.value: history_added_rss,
@@ -2053,35 +1986,29 @@ class GetMissingEpisodes(_PluginBase):
             item_with_key["unique"] = key
             history_all.append(item_with_key)
 
-            # 根据skip状态分类
             if item.get("skip", False):
                 history_skipped.append(item_with_key)
 
-            # 根据exist_status分类项目
             target_list = status_to_list.get(item["exist_status"])
             if target_list is not None:
                 target_list.append(item_with_key)
-            
-            # 根据剧集状态分类（新增：已完结）
+
             tv_info = item.get("tv_no_exist_info")
             if tv_info and tv_info.get("status_cn") == "已完结":
                 history_finished.append(item_with_key)
 
-        # 对"最近处理"列表使用状态变更时间排序，其他列表使用检查时间排序
         sort_by_last_status_change(history_all)
         sort_by_last_check(history_failed)
         sort_by_last_check(history_all_exist)
         sort_by_last_check(history_added_rss)
         sort_by_last_check(history_no_exist)
         sort_by_last_check(history_skipped)
-        sort_by_last_check(history_finished)  # 新增：已完结记录排序
+        sort_by_last_check(history_finished)
 
-        # 从数据中获取当前选中的历史数据类型
         saved_history_type = self.get_data("current_history_type")
         if saved_history_type:
             self._current_history_type = saved_history_type
 
-        # 根据当前选中的历史数据类型确定使用的列表
         history_type_to_list = {
             HistoryDataType.FAILED.value: history_failed,
             HistoryDataType.ADDED_RSS.value: history_added_rss,
@@ -2089,8 +2016,8 @@ class GetMissingEpisodes(_PluginBase):
             HistoryDataType.NO_EXIST.value: history_no_exist,
             HistoryDataType.SKIPPED.value: history_skipped,
             HistoryDataType.ALL.value: history_all,
-            HistoryDataType.LATEST.value: history_all[:10],  # 最近10条记录（按状态变更时间排序）
-            HistoryDataType.FINISHED.value: history_finished,  # 新增：已完结记录
+            HistoryDataType.LATEST.value: history_all[:10],
+            HistoryDataType.FINISHED.value: history_finished,
         }
 
         def __get_season_episode_no_exist_info(_history: ExtendedHistoryDetail):
@@ -2100,7 +2027,6 @@ class GetMissingEpisodes(_PluginBase):
             _no_exist_info = _tv_no_exist_info.get("season_episode_no_exist_info")
             if not _no_exist_info:
                 return []
-
             _values = _no_exist_info.values()
             return _values
 
@@ -2112,7 +2038,6 @@ class GetMissingEpisodes(_PluginBase):
                 for season_info in __get_season_episode_no_exist_info(history)
             )
         ]
-        # 对"已有季缺失"列表按状态变更时间排序
         sort_by_last_status_change(history_not_all_no_exist)
 
         if self._current_history_type == HistoryDataType.NOT_ALL_NO_EXIST.value:
@@ -2124,7 +2049,6 @@ class GetMissingEpisodes(_PluginBase):
 
         historys_posts_content = self.__get_historys_posts_content(historys_in_type)
 
-        # 统计数据
         historys_total = len(history_all)
         historys_no_exist_total = len(history_no_exist)
         historys_fail_total = len(history_failed)
@@ -2132,8 +2056,8 @@ class GetMissingEpisodes(_PluginBase):
         historys_all_exist_total = len(history_all_exist)
         historys_skipped_total = len(history_skipped)
         history_not_all_no_exist_total = len(history_not_all_no_exist)
-        historys_finished_total = len(history_finished)  # 新增：已完结统计
-        
+        historys_finished_total = len(history_finished)
+
         historys_statistics_content = self.__get_historys_statistics_content(
             historys_total=historys_total,
             historys_no_exist_total=historys_no_exist_total,
@@ -2142,10 +2066,9 @@ class GetMissingEpisodes(_PluginBase):
             historys_added_rss_total=historys_added_rss_total,
             history_not_all_no_exist_total=history_not_all_no_exist_total,
             historys_skipped_total=historys_skipped_total,
-            historys_finished_total=historys_finished_total,  # 新增
+            historys_finished_total=historys_finished_total,
         )
 
-        # 拼装页面
         return [
             {
                 "component": "div",
