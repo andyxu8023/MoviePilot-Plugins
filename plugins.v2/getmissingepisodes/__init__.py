@@ -108,7 +108,7 @@ def create_tv_no_exist_info(
     )
 
 
-class HistoryDetail(TypedDict):
+class HistoryDetail(TypedDict, total=False):
     exist_status: Optional[str]
     tv_no_exist_info: Optional[TvNoExistInfo]
     last_check: Optional[str]
@@ -116,6 +116,7 @@ class HistoryDetail(TypedDict):
     first_found_time: Optional[str]
     last_status_change: Optional[str]
     skip: Optional[bool]
+    ignored_seasons: Optional[List[int]]          # 新增：被手动标记存在的季号列表
 
 
 class ExtendedHistoryDetail(HistoryDetail):
@@ -431,7 +432,9 @@ class GetMissingEpisodes(_PluginBase):
                         logger.info(f"【{tv_no_exist_info.get('title', '未知')}】已完结，自动标记为跳过")
                 
                 if existing_record:
-                    # 已有记录，检查状态是否变化
+                    # 已有记录，保留原有的忽略列表
+                    ignored_seasons = existing_record.get("ignored_seasons", [])
+                    
                     existing_skip = existing_record.get("skip", False)
                     first_found_time = existing_record.get("first_found_time", existing_record.get("last_check_full", current_time_str))
                     previous_status = existing_record.get("exist_status")
@@ -456,9 +459,10 @@ class GetMissingEpisodes(_PluginBase):
                         "first_found_time": first_found_time,
                         "last_status_change": last_status_change,
                         "skip": final_skip,
+                        "ignored_seasons": ignored_seasons,
                     }
                 else:
-                    # 新记录
+                    # 新记录，忽略列表初始为空
                     history_data["details"][item_unique_flag] = {
                         "exist_status": exist_status.value,
                         "tv_no_exist_info": tv_no_exist_info,
@@ -467,6 +471,7 @@ class GetMissingEpisodes(_PluginBase):
                         "first_found_time": current_time_str,
                         "last_status_change": current_time_str,
                         "skip": auto_skip,
+                        "ignored_seasons": [],
                     }
                 
                 logger.debug(f"添加/更新检查记录: {item_unique_flag}, 状态: {exist_status.value}")
@@ -542,6 +547,11 @@ class GetMissingEpisodes(_PluginBase):
                         logger.info(f"【{item_title}】已被标记为跳过, 跳过检测")
                         continue
 
+                    # 获取该记录的忽略季列表
+                    ignored_seasons = []
+                    if item_unique_flag in details:
+                        ignored_seasons = details[item_unique_flag].get("ignored_seasons", [])
+
                     logger.info(f"正在获取 {item_title} ...")
 
                     # 检查媒体类型
@@ -566,8 +576,10 @@ class GetMissingEpisodes(_PluginBase):
                     item_dict["item_type"] = item_type
                     logger.debug(f"获到媒体库【{item_title}】数据：{item_dict}")
 
-                    # 获取缺失集数信息
-                    is_add_subscribe_success, tv_no_exist_info = self.__get_item_no_exist_info(item_dict)
+                    # 获取缺失集数信息，传入忽略季列表
+                    is_add_subscribe_success, tv_no_exist_info = self.__get_item_no_exist_info(
+                        item_dict, ignored_seasons
+                    )
 
                     # 处理结果
                     if is_add_subscribe_success and tv_no_exist_info:
@@ -643,9 +655,12 @@ class GetMissingEpisodes(_PluginBase):
         # ==== 结束新增 ====
 
     def __get_item_no_exist_info(
-        self, item_dict: dict[str, Any]
+        self,
+        item_dict: dict[str, Any],
+        ignored_seasons: Optional[List[int]] = None
     ) -> tuple[bool, TvNoExistInfo]:
-        """获取缺失集数"""
+        """获取缺失集数，支持忽略指定季"""
+        ignored_seasons = ignored_seasons or []
         title = item_dict.get("title") or item_dict.get("original_title") or "未知"
 
         tv_no_exist_info = create_tv_no_exist_info(
@@ -731,11 +746,16 @@ class GetMissingEpisodes(_PluginBase):
                 logger.debug(f"【{title}】全部季不存在, 添加全部季集数")
                 # 全部季不存在
                 for season, _ in tmdbinfo_seasons:
-                    # 新增：检查是否跳过S00季
+                    # 检查是否跳过S00季
                     if season == 0 and not self._include_s00_season:
                         logger.debug(f"【{title}】跳过S00季检测")
                         continue
-                        
+                    
+                    # 检查是否被手动忽略
+                    if season in ignored_seasons:
+                        logger.info(f"【{title}】第【{season}】季已在忽略列表中，跳过检测")
+                        continue
+                    
                     filted_episodes = self.__filter_episodes(tmdbid, season, title)
                     if not filted_episodes:
                         logger.debug(f"【{title}】第【{season}】季未获取到TMDB集数信息, 跳过")
@@ -759,9 +779,14 @@ class GetMissingEpisodes(_PluginBase):
                 logger.debug(f"【{title}】检查每季缺失的集")
                 # 检查每季缺失的季集
                 for season, _ in tmdbinfo_seasons:
-                    # 新增：检查是否跳过S00季
+                    # 检查是否跳过S00季
                     if season == 0 and not self._include_s00_season:
                         logger.debug(f"【{title}】跳过S00季检测")
+                        continue
+                    
+                    # 检查是否被手动忽略
+                    if season in ignored_seasons:
+                        logger.info(f"【{title}】第【{season}】季已在忽略列表中，跳过检测")
                         continue
                     
                     filted_episodes = self.__filter_episodes(tmdbid, season, title)
@@ -1156,7 +1181,7 @@ class GetMissingEpisodes(_PluginBase):
             return schemas.Response(success=False, message="订阅失败")
 
     def set_all_exist_history(self, key: str, apikey: str):
-        """标记存在检查记录"""
+        """标记存在检查记录：将当前缺失的季加入忽略列表，并更新状态为全部存在"""
         logger.info(f"开始标记存在检查记录: {key}")
         if apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
@@ -1167,13 +1192,35 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning("未找到检查记录")
             return schemas.Response(success=False, message="未找到检查记录")
 
-        is_success, historys = GetMissingEpisodes.__update_exist_status_by_unique(
+        # 获取当前记录
+        record = historys["details"].get(key)
+        if not record:
+            logger.warning(f"记录不存在: {key}")
+            return schemas.Response(success=False, message="记录不存在")
+
+        # 获取当前缺失的季号列表
+        tv_info = record.get("tv_no_exist_info")
+        missing_seasons = []
+        if tv_info:
+            season_info = tv_info.get("season_episode_no_exist_info", {})
+            missing_seasons = [int(s) for s in season_info.keys()]
+
+        # 合并到忽略列表（去重）
+        ignored = record.get("ignored_seasons", [])
+        for season in missing_seasons:
+            if season not in ignored:
+                ignored.append(season)
+
+        # 更新状态为 ALL_EXIST
+        is_success, historys = self.__update_exist_status_by_unique(
             historys, key, HistoryStatus.ALL_EXIST.value
         )
         if is_success:
-            logger.info(f"标记存在 {key} 成功")
+            # 保存更新后的忽略列表
+            historys["details"][key]["ignored_seasons"] = ignored
             self.save_data("history", historys)
-            return schemas.Response(success=True, message="标记存在成功")
+            logger.info(f"标记存在 {key} 成功，已忽略季: {missing_seasons}")
+            return schemas.Response(success=True, message="标记存在成功，缺失季已加入忽略列表")
         else:
             logger.warning(f"标记存在 {key} 失败")
             return schemas.Response(success=False, message="标记存在失败")
