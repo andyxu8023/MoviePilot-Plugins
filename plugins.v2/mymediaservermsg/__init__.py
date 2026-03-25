@@ -1054,7 +1054,7 @@ class mymediaservermsg(_PluginBase):
             self._webhook_msg_keys.pop(key, None)
 
     @cached(
-        region="MediaServerMsgMy",
+        region="MyMediaServerMsg",
         maxsize=128,
         ttl=600,
         skip_none=True,
