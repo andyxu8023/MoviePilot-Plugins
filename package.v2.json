@@ -26,3 +26,17 @@
     }
   }
 }
+{
+  "MyMediaServerMsg": {
+    "name": "媒体库服务器通知",
+    "description": "转发媒体库服务器的相关通知",
+    "labels": "通知",
+    "version": "2.0.0",
+    "icon": "mediaplay.png",
+    "author": "jxxghp，左岸",
+    "level": 2,
+    "history": {
+      "v2.0.0": "自用版"
+    }
+  }
+}
