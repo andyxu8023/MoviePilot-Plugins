@@ -18,7 +18,7 @@ from app.schemas.types import EventType, MediaType, MediaImageType, Notification
 from app.utils.web import WebUtils
 
 
-class mymediaservermsg(_PluginBase):
+class MyMediaServerMsg(_PluginBase):
     """
     媒体服务器通知插件 AI增强版
 
