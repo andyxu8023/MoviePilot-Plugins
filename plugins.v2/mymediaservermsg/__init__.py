@@ -41,7 +41,7 @@ class MyMediaServerMsg(_PluginBase):
 
     # ==================== 插件基本信息 ====================
     plugin_name = "媒体库服务器通知"
-    plugin_desc = "基于Emby识别结果+TMDB元数据+微信清爽版(全消息类型+剧集聚合)"
+    plugin_desc = "转发媒体库服务器的相关通知"
     plugin_icon = "mediaplay.png"
     plugin_version = "2.0.0"
     plugin_author = "jxxghp，左岸"
