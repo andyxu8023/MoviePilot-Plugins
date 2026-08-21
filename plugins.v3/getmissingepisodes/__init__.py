@@ -181,7 +181,7 @@ class GetMissingEpisodes(_PluginBase):
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
     plugin_order = 6
-    auth_level = 3
+    auth_level = 2
 
     _event = Event()
     _lock = Lock()
