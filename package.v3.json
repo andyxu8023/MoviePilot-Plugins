@@ -6,7 +6,7 @@
     "version": "3.0.0",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
     "author": "boeto，左岸",
-    "level": 3,
+    "level": 2,
     "history": {
       "v3.0.0": "适配MoviePilot-V3",
       "v2.2.7": "修复：当某个剧集被用户手动标记存在后，在下一次扫描中会再次被判定为缺失的问题。现在的效果是：标记存在后，当前缺失的季将永久不再被视为缺失，但新季仍正常检测",
