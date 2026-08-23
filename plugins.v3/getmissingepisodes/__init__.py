@@ -176,7 +176,7 @@ class GetMissingEpisodes(_PluginBase):
     plugin_name = "剧集补全&新季追更"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "boeto，左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
@@ -771,7 +771,7 @@ class GetMissingEpisodes(_PluginBase):
                         continue
                         
                     # 判断用户是否已经添加订阅
-                    if self._subOper.exists(tmdbid, None, season=season):
+                    if self._subOper.exists(MediaSource.TMDB, str(tmdbid), season=season):
                         logger.info(f"【{title}】第【{season}】季已存在订阅, 跳过")
                         continue
                     
@@ -815,7 +815,7 @@ class GetMissingEpisodes(_PluginBase):
                     logger.debug(f"【{title}】第【{season}】季在媒体库已存在的集数信息: {exist_episode}")
                     
                     # 判断用户是否已经添加订阅
-                    if self._subOper.exists(tmdbid, None, season=season):
+                    if self._subOper.exists(MediaSource.TMDB, str(tmdbid), season=season):
                         logger.info(f"【{title}】第【{season}】季已存在订阅, 跳过")
                         continue
                         
@@ -1022,7 +1022,7 @@ class GetMissingEpisodes(_PluginBase):
                     break
 
         # 判断用户是否已经添加订阅
-        if self._subOper.exists(tmdbid, None, season=season):
+        if self._subOper.exists(MediaSource.TMDB, str(tmdbid), season=season):
             logger.info(f"{title_season} 订阅已存在")
             return True
 
