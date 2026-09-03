@@ -13,8 +13,8 @@ from app import schemas
 from app.chain.media import MediaChain
 from app.chain.subscribe import SubscribeChain
 from app.db.subscribe_oper import SubscribeOper
-from app.core.config import settings
-from app.log import logger
+from app.sdk.config import settings
+from app.sdk.logging import logger
 from app.plugins import _PluginBase
 from app.chain.mediaserver import MediaServerChain
 from app.helper.mediaserver import MediaServerHelper
