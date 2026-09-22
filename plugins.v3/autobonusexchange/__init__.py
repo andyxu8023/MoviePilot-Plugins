@@ -36,7 +36,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -693,6 +693,11 @@ class AutoBonusExchange(_PluginBase):
 
             # 执行兑换
             for item in exchange_plan:
+                # 检查项目是否可用
+                if not item.get("available", True):
+                    logger.info(f"{site_name} 跳过不可用项目: {item.get('name')}")
+                    continue
+                
                 # 如果是API模式，使用API兑换
                 if is_api_mode:
                     exchange_result = self._exchange_api_item(
@@ -1126,11 +1131,10 @@ class NexusPHPBonusAdapter:
                     continue
 
                 # 检查是否可以交换 (submit 按钮未 disabled)
-                # 匹配 disabled, disabled="disabled", disabled='disabled' 等格式
-                submit_match = re.search(r'<input[^>]*type=["\']submit["\'][^>]*value=["\']([^"\']+)["\']', form_html, re.IGNORECASE)
+                # 匹配整个 submit input 标签，包括后面的 disabled 属性
+                submit_match = re.search(r'<input[^>]*type=["\']submit["\'][^>]*/?\s*>', form_html, re.IGNORECASE)
                 is_available = True
                 if submit_match:
-                    # 检查整个 submit input 标签是否包含 disabled 属性
                     submit_tag = submit_match.group(0)
                     if re.search(r'\bdisabled\b', submit_tag, re.IGNORECASE):
                         is_available = False
@@ -1219,16 +1223,50 @@ class NexusPHPBonusAdapter:
             # 调试：记录响应片段
             logger.debug(f"{item_name} 兑换响应前500字符: {res.text[:500]}")
 
-            # 检查是否兑换成功
-            if "成功" in res.text or "success" in res.text.lower() or "兑换完成" in res.text:
-                logger.info(f"兑换成功: {item_name}")
-                return {"success": True}
+            # 检查是否有错误提示（优先检查错误）
+            error_keywords = [
+                "失败", "error", "不足", "分享率已很高", "需要更多魔力值",
+                "disabled", "不允许", "无法兑换", "兑换失败", "权限不足",
+                "等级不够", "余额不足", "魔力值不足"
+            ]
+            response_lower = res.text.lower()
+            for keyword in error_keywords:
+                if keyword.lower() in response_lower:
+                    # 提取错误信息
+                    error_match = re.search(rf'{keyword}[：:]\s*([^<]+)', res.text, re.IGNORECASE)
+                    error_msg = error_match.group(1).strip() if error_match else keyword
+                    logger.warn(f"{item_name} 兑换失败: {error_msg}")
+                    return {"success": False, "error": error_msg}
 
-            # 检查是否有错误提示
-            if "失败" in res.text or "error" in res.text.lower() or "不足" in res.text:
-                error_match = re.search(r'(?:错误|失败|Error)[：:]\s*([^<]+)', res.text)
-                error_msg = error_match.group(1).strip() if error_match else "未知错误"
-                return {"success": False, "error": error_msg}
+            # 检查是否兑换成功
+            success_keywords = ["成功", "success", "兑换完成", "交易完成"]
+            for keyword in success_keywords:
+                if keyword.lower() in response_lower:
+                    logger.info(f"兑换成功: {item_name}")
+                    return {"success": True}
+
+            # 检查魔力值是否减少（通过检查页面中的魔力值）
+            # 如果响应中包含魔力值，且比兑换前少，则认为成功
+            bonus_patterns = [
+                r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
+                r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
+                r'当前([\d][\d,.]*\d)',
+                r'魔力值[^:]*[：:]\s*([\d][\d,.]*\d)',
+            ]
+            for pattern in bonus_patterns:
+                bonus_match = re.search(pattern, res.text, re.IGNORECASE)
+                if bonus_match:
+                    bonus_str = bonus_match.group(1).replace(",", "")
+                    try:
+                        new_bonus = float(bonus_str)
+                        # 如果新魔力值比消耗后还多，说明兑换失败
+                        # 这里无法获取兑换前的值，所以只做简单检查
+                        if new_bonus > cost * 10:  # 如果魔力值远大于消耗，可能兑换失败
+                            logger.warn(f"{item_name} 兑换可能失败: 魔力值未减少")
+                            return {"success": False, "error": "魔力值未减少"}
+                    except ValueError:
+                        pass
+                    break
 
             # 默认认为成功（NexusPHP 通常返回原页面）
             logger.debug(f"{item_name} 未检测到明确成功/失败标识，默认认为成功")
