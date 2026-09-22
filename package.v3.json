@@ -33,13 +33,13 @@
     "name": "魔力值自动兑换",
     "description": "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)",
     "labels": "站点,自动化,魔力",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png",
     "author": "左岸",
     "level": 2,
     "system_version": ">=2.12.0",
     "history": {
-      "v2.0.0": "目前已知支持站点：红豆饭，AGSVPT，高清时间，高清视界，铂金家，萝莉，PT时间，高清杜比(需要配置cookie)，憨憨，青蛙，海胆之家。不支持站点：馒头。",
+      "v2.0.1": "目前已知支持站点：红豆饭，AGSVPT，高清时间，高清视界，铂金家，萝莉，PT时间，高清杜比(需要配置cookie)，憨憨，青蛙，海胆之家。不支持站点：馒头。",
       "v1.0.0": "初始版本"
     }
   }
