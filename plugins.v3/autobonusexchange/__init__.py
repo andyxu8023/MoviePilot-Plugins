@@ -30,7 +30,7 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换"
+    plugin_name = "魔力值自动兑换💻"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
@@ -236,10 +236,8 @@ class AutoBonusExchange(_PluginBase):
                                         "model": "strategy",
                                         "label": "兑换策略",
                                         "items": [
-                                            {"title": "固定数量", "value": "fixed"},
                                             {"title": "最大化兑换", "value": "maximize"},
-                                            {"title": "保留余额", "value": "keep_balance"},
-                                            {"title": "分享率优先", "value": "ratio_priority"}
+                                            {"title": "保留余额", "value": "keep_balance"}
                                         ]
                                     }
                                 }]
@@ -732,18 +730,12 @@ class AutoBonusExchange(_PluginBase):
 
         plan = []
 
-        if self._strategy == "fixed":
-            # 固定数量策略
-            plan = self._fixed_strategy(available_items, current_bonus)
-        elif self._strategy == "maximize":
+        if self._strategy == "maximize":
             # 最大化策略
             plan = self._maximize_strategy(available_items, current_bonus)
-        elif self._strategy == "keep_balance":
-            # 保留余额策略
+        else:
+            # 保留余额策略（默认）
             plan = self._keep_balance_strategy(available_items, current_bonus)
-        elif self._strategy == "ratio_priority":
-            # 分享率优先策略
-            plan = self._ratio_priority_strategy(available_items, current_bonus)
 
         return plan
 
@@ -764,44 +756,10 @@ class AutoBonusExchange(_PluginBase):
         
         return filtered
 
-    def _fixed_strategy(self, items: List[dict], current_bonus: float) -> List[dict]:
-        """固定数量兑换策略：先各档位一次，再用剩余魔力值重复兑换性价比最高的档位。"""
-        plan = []
-        remaining_bonus = current_bonus - self._keep_balance
-
-        if remaining_bonus <= 0:
-            return []
-
-        # 只选择可用的项目
-        available_items = [i for i in items if i.get("available", True)]
-        
-        # 根据兑换类型筛选
-        traffic_items = self._filter_traffic_items(available_items)
-
-        if not traffic_items:
-            return []
-
-        # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
-        sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
-
-        # 第一轮：每个档位兑换一次
-        for item in sorted_items:
-            if remaining_bonus >= item.get("cost", float("inf")):
-                plan.append(item)
-                remaining_bonus -= item.get("cost", 0)
-
-        # 第二轮：用剩余魔力值重复兑换性价比最高的档位
-        best_item = sorted_items[0]  # 性价比最高，同等性价比时消耗最大
-        while remaining_bonus >= best_item.get("cost", float("inf")):
-            plan.append(best_item)
-            remaining_bonus -= best_item.get("cost", 0)
-
-        return plan
-
     def _maximize_strategy(self, items: List[dict], current_bonus: float) -> List[dict]:
         """最大化兑换策略：重复兑换性价比最高的档位直到魔力值不足。"""
         plan = []
-        remaining_bonus = current_bonus - self._keep_balance
+        remaining_bonus = current_bonus
 
         if remaining_bonus <= 0:
             return []
@@ -818,8 +776,17 @@ class AutoBonusExchange(_PluginBase):
         # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
         sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
         
-        # 重复兑换性价比最高的档位
-        best_item = sorted_items[0]
+        # 找到第一个可用的档位
+        best_item = None
+        for item in sorted_items:
+            if item.get("available", False):
+                best_item = item
+                break
+        
+        if not best_item:
+            return []
+
+        # 重复兑换性价比最高的可用档位
         while remaining_bonus >= best_item.get("cost", float("inf")):
             plan.append(best_item)
             remaining_bonus -= best_item.get("cost", 0)
@@ -846,35 +813,7 @@ class AutoBonusExchange(_PluginBase):
         # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
         sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
 
-        # 重复兑换性价比最高的档位
-        best_item = sorted_items[0]
-        while available_bonus >= best_item.get("cost", float("inf")):
-            plan.append(best_item)
-            available_bonus -= best_item.get("cost", 0)
-
-        return plan
-
-    def _ratio_priority_strategy(self, items: List[dict], current_bonus: float) -> List[dict]:
-        """分享率优先策略：优先兑换上传量，重复兑换性价比最高的档位。"""
-        plan = []
-        remaining_bonus = current_bonus - self._keep_balance
-
-        if remaining_bonus <= 0:
-            return []
-
-        # 只选择可用的项目
-        available_items = [i for i in items if i.get("available", True)]
-        
-        # 根据兑换类型筛选
-        traffic_items = self._filter_traffic_items(available_items)
-
-        if not traffic_items:
-            return []
-
-        # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
-        sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
-
-        # 找到第一个可用的档位（available=True）
+        # 找到第一个可用的档位
         best_item = None
         for item in sorted_items:
             if item.get("available", False):
@@ -885,9 +824,9 @@ class AutoBonusExchange(_PluginBase):
             return []
 
         # 重复兑换性价比最高的可用档位
-        while remaining_bonus >= best_item.get("cost", float("inf")):
+        while available_bonus >= best_item.get("cost", float("inf")):
             plan.append(best_item)
-            remaining_bonus -= best_item.get("cost", 0)
+            available_bonus -= best_item.get("cost", 0)
 
         return plan
 
