@@ -30,7 +30,7 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换💻"
+    plugin_name = "魔力值自动兑换"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
