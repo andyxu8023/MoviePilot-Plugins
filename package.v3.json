@@ -34,7 +34,7 @@
     "description": "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)",
     "labels": "站点,自动化,魔力",
     "version": "2.0.0",
-    "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/autobonusexchange.png",
+    "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png",
     "author": "左岸",
     "level": 2,
     "system_version": ">=2.12.0",
