@@ -806,10 +806,10 @@ class AutoBonusExchange(_PluginBase):
         # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
         sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
         
-        # 找到第一个可用的档位
+        # 找到成本不超过当前魔力值的最高性价比档位
         best_item = None
         for item in sorted_items:
-            if item.get("available", False):
+            if item.get("cost", float("inf")) <= remaining_bonus:
                 best_item = item
                 break
         
@@ -843,10 +843,10 @@ class AutoBonusExchange(_PluginBase):
         # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
         sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
 
-        # 找到第一个可用的档位
+        # 找到成本不超过可用魔力值的最高性价比档位
         best_item = None
         for item in sorted_items:
-            if item.get("available", False):
+            if item.get("cost", float("inf")) <= available_bonus:
                 best_item = item
                 break
         
