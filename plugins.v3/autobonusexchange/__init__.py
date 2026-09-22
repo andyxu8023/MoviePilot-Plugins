@@ -30,13 +30,13 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换"
+    plugin_name = "魔力值自动兑换💻"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "2.0.0"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -553,13 +553,15 @@ class AutoBonusExchange(_PluginBase):
                 logger.warn(f"{site_name} 未配置站点地址")
                 return site_name, result
 
-            # 判断认证方式
-            auth_mode = "cookie"
-            if site_token:
+            # 判断认证方式 - 优先使用cookie
+            auth_mode = None
+            if site_cookie:
+                auth_mode = "cookie"
+            elif site_token:
                 auth_mode = "token"
             elif site_apikey:
                 auth_mode = "apikey"
-            elif not site_cookie:
+            else:
                 result["status"] = "failed"
                 result["error"] = "未配置认证信息(Cookie/APIKey/Token)"
                 logger.warn(f"{site_name} 未配置认证信息")
@@ -606,13 +608,22 @@ class AutoBonusExchange(_PluginBase):
 
             res = req_utils.get_res(url=bonus_url)
             
-            # 如果 mybonus.php 返回404或内容不对，尝试 bonusshop.php
-            if not res or res.status_code == 404 or (res.status_code == 200 and "mybonus" not in res.text.lower() and "bonusshop" not in res.text.lower() and "exchange" not in res.text.lower()):
+            # 检查页面是否包含兑换表单，如果没有则尝试 bonusshop.php
+            has_exchange_form = res and res.status_code == 200 and re.search(r'<form[^>]*action=["\']?\?action=exchange["\']?', res.text, re.IGNORECASE)
+            
+            # 检查是否使用API模式（如青蛙站点）
+            is_api_mode = res and res.status_code == 200 and '/api/bonus-shop/getItems' in res.text
+            
+            if not has_exchange_form and not is_api_mode:
                 alt_url = urljoin(site_url, "bonusshop.php")
-                logger.info(f"{site_name} 尝试备用URL: {alt_url}")
-                res = req_utils.get_res(url=alt_url)
-                if res and res.status_code == 200:
+                logger.info(f"{site_name} mybonus.php 无兑换表单，尝试备用URL: {alt_url}")
+                alt_res = req_utils.get_res(url=alt_url)
+                if alt_res and alt_res.status_code == 200:
+                    res = alt_res
                     bonus_url = alt_url
+                    # 重新检查是否为API模式
+                    is_api_mode = '/api/bonus-shop/getItems' in res.text
+            
             if not res or res.status_code != 200:
                 result["status"] = "failed"
                 result["error"] = f"获取魔力商店失败，状态码: {res.status_code if res else 'None'}"
@@ -622,7 +633,13 @@ class AutoBonusExchange(_PluginBase):
 
             # 解析魔力商店
             adapter = NexusPHPBonusAdapter()
-            bonus_info = adapter.parse_bonus_page(res.text)
+            
+            # 如果是API模式，使用API获取兑换项目
+            if is_api_mode:
+                logger.info(f"{site_name} 使用API模式获取兑换项目")
+                bonus_info = self._parse_api_bonus_page(req_utils, site_url, res.text)
+            else:
+                bonus_info = adapter.parse_bonus_page(res.text)
 
             # 调试：保存 HTML 到文件
             try:
@@ -676,13 +693,23 @@ class AutoBonusExchange(_PluginBase):
 
             # 执行兑换
             for item in exchange_plan:
-                exchange_result = adapter.exchange_item(
-                    req_utils=req_utils,
-                    bonus_url=bonus_url,
-                    item_id=item.get("option"),
-                    item_name=item.get("name"),
-                    cost=item.get("cost")
-                )
+                # 如果是API模式，使用API兑换
+                if is_api_mode:
+                    exchange_result = self._exchange_api_item(
+                        req_utils=req_utils,
+                        site_url=site_url,
+                        item_id=item.get("option"),
+                        item_name=item.get("name"),
+                        cost=item.get("cost")
+                    )
+                else:
+                    exchange_result = adapter.exchange_item(
+                        req_utils=req_utils,
+                        bonus_url=bonus_url,
+                        item_id=item.get("option"),
+                        item_name=item.get("name"),
+                        cost=item.get("cost")
+                    )
 
                 if exchange_result.get("success"):
                     result["exchanged"].append({
@@ -700,7 +727,10 @@ class AutoBonusExchange(_PluginBase):
             # 重新获取魔力值
             res = req_utils.get_res(url=bonus_url)
             if res and res.status_code == 200:
-                new_bonus_info = adapter.parse_bonus_page(res.text)
+                if is_api_mode:
+                    new_bonus_info = self._parse_api_bonus_page(req_utils, site_url, res.text)
+                else:
+                    new_bonus_info = adapter.parse_bonus_page(res.text)
                 if new_bonus_info:
                     result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
 
@@ -830,6 +860,150 @@ class AutoBonusExchange(_PluginBase):
 
         return plan
 
+    def _parse_api_bonus_page(self, req_utils: RequestUtils, site_url: str, html: str) -> Optional[dict]:
+        """
+        解析API模式的魔力商店页面（如青蛙站点）。
+
+        :param req_utils: 请求工具
+        :param site_url: 站点URL
+        :param html: 页面 HTML 内容
+        :return: 解析结果字典
+        """
+        if not html:
+            return None
+
+        result = {
+            "current_bonus": 0,
+            "available_items": [],
+        }
+
+        try:
+            # 解析当前魔力值
+            bonus_patterns = [
+                r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
+                r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
+                r'当前([\d][\d,.]*\d)',
+                r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',
+                r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',
+            ]
+            for pattern in bonus_patterns:
+                bonus_match = re.search(pattern, html, re.IGNORECASE)
+                if bonus_match:
+                    bonus_str = bonus_match.group(1).replace(",", "")
+                    try:
+                        result["current_bonus"] = float(bonus_str)
+                    except ValueError:
+                        pass
+                    break
+
+            # 通过API获取兑换项目列表
+            api_url = urljoin(site_url, "api/bonus-shop/getItems")
+            logger.info(f"请求API: {api_url}")
+            
+            res = req_utils.get_res(api_url)
+            if not res or res.status_code != 200:
+                logger.warn(f"API请求失败: {res.status_code if res else 'None'}")
+                return result
+
+            # 解析JSON响应
+            import json
+            try:
+                items_data = json.loads(res.text)
+                logger.info(f"API返回 {len(items_data)} 个项目")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                return result
+
+            # 转换API数据为统一格式
+            items = []
+            for item in items_data:
+                item_id = item.get("id")
+                item_name = item.get("name", "")
+                cost = item.get("a_amount", 0)  # 消耗的蝌蚪/魔力值
+                b_type = item.get("b_type", "")  # uploaded 或 downloaded
+                b_amount = item.get("b_amount", 0)  # 获得的字节数
+
+                # 计算性价比
+                ratio = 0
+                if b_type == "uploaded" and b_amount > 0:
+                    gb = b_amount / (1024 * 1024 * 1024)  # 转换为GB
+                    ratio = gb / cost if cost > 0 else 0
+                elif b_type == "downloaded" and b_amount > 0:
+                    gb = b_amount / (1024 * 1024 * 1024)
+                    ratio = gb / cost * 0.5 if cost > 0 else 0
+
+                items.append({
+                    "option": item_id,
+                    "name": item_name,
+                    "cost": cost,
+                    "ratio": ratio,
+                    "available": True,  # API模式默认都可用
+                    "b_type": b_type,
+                    "b_amount": b_amount,
+                })
+
+            result["available_items"] = items
+            logger.info(f"API解析到 {len(items)} 个兑换项目，当前魔力值: {result['current_bonus']}")
+
+        except Exception as e:
+            logger.error(f"API解析魔力商店失败: {str(e)}")
+            traceback.print_exc()
+            return None
+
+        return result
+
+    def _exchange_api_item(self, req_utils: RequestUtils, site_url: str, item_id: int,
+                           item_name: str, cost: float) -> dict:
+        """
+        执行API模式的单个兑换操作。
+
+        :param req_utils: 请求工具
+        :param site_url: 站点URL
+        :param item_id: 兑换选项 ID
+        :param item_name: 兑换项名称
+        :param cost: 消耗魔力值
+        :return: 兑换结果
+        """
+        try:
+            logger.info(f"开始API兑换: {item_name} (消耗: {cost})")
+
+            # POST 请求兑换
+            exchange_url = urljoin(site_url, "api/bonus-shop/exchange")
+            data = {
+                "id": str(item_id),
+                "amount": "1",  # 数量为1
+            }
+
+            res = req_utils.post_res(url=exchange_url, data=data)
+
+            if not res:
+                logger.debug(f"{item_name} API兑换请求失败: 无响应")
+                return {"success": False, "error": "请求失败"}
+
+            if res.status_code != 200:
+                logger.debug(f"{item_name} API兑换请求失败: 状态码 {res.status_code}")
+                return {"success": False, "error": f"状态码: {res.status_code}"}
+
+            # 解析JSON响应
+            import json
+            try:
+                result_data = json.loads(res.text)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                return {"success": False, "error": "响应解析失败"}
+
+            # 检查是否兑换成功
+            if result_data.get("success"):
+                logger.info(f"API兑换成功: {item_name}")
+                return {"success": True}
+            else:
+                error_msg = result_data.get("msg", "未知错误")
+                logger.warn(f"API兑换失败: {item_name} - {error_msg}")
+                return {"success": False, "error": error_msg}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def _check_circuit_breaker(self, site_name: str) -> bool:
         """检查站点是否触发熔断。"""
         fail_count = self._circuit_breaker.get(site_name, 0)
@@ -881,11 +1055,13 @@ class NexusPHPBonusAdapter:
             #   [使用</a>]: 7,105,672.0  (红豆饭等)
             #   魔力值（当前7,005,772.0  (部分站点)
             #   蝌蚪...使用</a>]: 329,468.8  (青蛙)
+            #   憨豆...<div class="text-base font-bold">17122.9</div>  (憨憨)
             bonus_patterns = [
                 r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',  # ]：数字
                 r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',   # ]: 数字
                 r'当前([\d][\d,.]*\d)',                       # 当前数字
                 r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',       # 青蛙特殊div
+                r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',  # 憨憨特殊div
             ]
             for pattern in bonus_patterns:
                 bonus_match = re.search(pattern, html, re.IGNORECASE)
@@ -898,10 +1074,16 @@ class NexusPHPBonusAdapter:
                     break
 
             # 解析可兑换项目
-            # 格式: <form action="?action=exchange" method="post">
+            # 格式1 (标准NexusPHP): <form action="?action=exchange" method="post">
             #        <input type="hidden" name="option" value="X" />
             #        <h1>项目名称</h1>
             #        <td>价格</td>
+            #        <input type="submit" value="交换" />
+            #       </form>
+            # 格式2 (憨憨等): <form action="?action=exchange" method="post">
+            #        <input type="hidden" name="option" value="X" />
+            #        <div class="font-bold text-base">项目名称</div>
+            #        <div class="break-all">价格</div>
             #        <input type="submit" value="交换" />
             #       </form>
             items = []
@@ -917,14 +1099,20 @@ class NexusPHPBonusAdapter:
                     continue
                 option_id = int(option_match.group(1))
 
-                # 提取项目名称 (在 h1 标签中，可能有class属性)
+                # 提取项目名称 - 先尝试 h1 标签，再尝试 div 标签
                 name_match = re.search(r'<h1[^>]*>(.*?)</h1>', form_html, re.IGNORECASE | re.DOTALL)
+                if not name_match:
+                    # 尝试 div 标签（憨憨等站点）
+                    name_match = re.search(r'<div[^>]*class=["\'][^"\']*font-bold[^"\']*["\'][^>]*>(.*?)</div>', form_html, re.IGNORECASE | re.DOTALL)
                 if not name_match:
                     continue
                 item_name = self._clean_html(name_match.group(1))
 
-                # 提取价格 (在第三个 td 中，或包含数字的 td)
+                # 提取价格 - 先尝试 td 标签，再尝试 div 标签
                 price_match = re.search(r'<td[^>]*align=["\']?center["\']?[^>]*>([\d,.]+)</td>', form_html, re.IGNORECASE)
+                if not price_match:
+                    # 尝试 div 标签（憨憨等站点）
+                    price_match = re.search(r'<div[^>]*class=["\'][^"\']*break-all[^"\']*["\'][^>]*>([\d,.]+)</div>', form_html, re.IGNORECASE)
                 if not price_match:
                     # 尝试其他格式
                     price_match = re.search(r'(\d[\d,.]*)\s*(?:个)?魔力', form_html, re.IGNORECASE)
