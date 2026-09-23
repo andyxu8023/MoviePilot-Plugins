@@ -1,11 +1,12 @@
 from pathlib import Path
 from threading import Event, Lock
+from threading import Thread
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import datetime
 import pytz
 from enum import Enum
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 from app.chain.tmdb import TmdbChain
 from app.schemas.types import MediaType, MediaSource
@@ -13,8 +14,8 @@ from app import schemas
 from app.chain.media import MediaChain
 from app.chain.subscribe import SubscribeChain
 from app.db.subscribe_oper import SubscribeOper
-from app.sdk.config import settings
-from app.sdk.logging import logger
+from app.core.config import settings
+from app.log import logger
 from app.plugins import _PluginBase
 from app.chain.mediaserver import MediaServerChain
 from app.helper.mediaserver import MediaServerHelper
@@ -173,11 +174,11 @@ class SVGPaths:
 
 
 class GetMissingEpisodes(_PluginBase):
-    plugin_name = "剧集管家"
+    plugin_name = "剧集管家💻"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
-    plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
-    plugin_version = "3.0.2"
-    plugin_author = "boeto，左岸"
+    plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
+    plugin_version = "3.1.2"
+    plugin_author = "左岸"
     author_url = "https://github.com/andyxu8023"
     plugin_config_prefix = "getmissingepisodes_"
     plugin_order = 6
@@ -211,6 +212,27 @@ class GetMissingEpisodes(_PluginBase):
     _current_history_type: str = HistoryDataType.LATEST.value
     _auto_skip_finished: bool = False
     _include_s00_season: bool = False
+    _show_sidebar_nav: bool = True
+
+    # 运行时状态
+    _checking: bool = False
+
+    # Vue 工作台允许提交的配置项
+    _EDITABLE_SETTINGS_KEYS = (
+        "enabled",
+        "cron",
+        "onlyonce",
+        "clear",
+        "only_season_exist",
+        "only_aired",
+        "no_exist_action",
+        "save_path_replaces",
+        "whitelist_librarys",
+        "whitelist_media_servers",
+        "auto_skip_finished",
+        "include_s00_season",
+        "show_sidebar_nav",
+    )
 
     def init_plugin(self, config: dict[str, Any] | None = None):
         """初始化插件"""
@@ -272,6 +294,9 @@ class GetMissingEpisodes(_PluginBase):
             default=[]
         )
 
+        # 侧边栏入口开关，默认开启
+        self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
+
     def _parse_list_config(self, config_value: Any, default: List[str] = None) -> List[str]:
         """解析列表配置，支持字符串和列表格式"""
         if default is None:
@@ -315,40 +340,92 @@ class GetMissingEpisodes(_PluginBase):
         return self._enabled
 
     @staticmethod
+    def get_render_mode() -> Tuple[str, Optional[str]]:
+        """声明插件渲染模式：存在联邦构建产物时使用 Vue 工作台。"""
+        remote_entry = Path(__file__).parent / "dist" / "assets" / "remoteEntry.js"
+        if remote_entry.is_file():
+            return "vue", "dist/assets"
+        return "vuetify", None
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        """向主界面侧栏订阅分组注册剧集管家入口。"""
+        if not self.get_state() or not self._show_sidebar_nav:
+            return []
+        if self.get_render_mode()[0] != "vue":
+            return []
+        return [
+            {
+                "nav_key": "main",
+                "title": "剧集管家",
+                "icon": "mdi-television-classic",
+                "section": "subscribe",
+                "permission": "subscribe",
+                "order": 30,
+            }
+        ]
+
+    @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
+        """注册 Vue 工作台与外部调用使用的插件 API。"""
         return [
             {
                 "path": "/delete_history",
                 "endpoint": self.delete_history,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": f"删除 {self.plugin_name} 检查记录",
             },
             {
                 "path": "/set_all_exist_history",
                 "endpoint": self.set_all_exist_history,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": f"标记 {self.plugin_name} 存在记录",
             },
             {
                 "path": "/add_subscribe_history",
                 "endpoint": self.add_subscribe_history,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": f"订阅 {self.plugin_name} 缺失记录",
             },
             {
                 "path": "/toggle_skip_history",
                 "endpoint": self.toggle_skip_history,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": f"切换 {self.plugin_name} 跳过状态",
             },
             {
                 "path": "/set_history_type",
                 "endpoint": self.set_history_type,
                 "methods": ["GET"],
+                "auth": "bear",
                 "summary": f"设置 {self.plugin_name} 历史数据类型",
+            },
+            {
+                "path": "/status",
+                "endpoint": self.get_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": f"获取 {self.plugin_name} 工作台总览数据",
+            },
+            {
+                "path": "/settings",
+                "endpoint": self.update_settings,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": f"保存 {self.plugin_name} 插件设置",
+            },
+            {
+                "path": "/run",
+                "endpoint": self.run_check_now,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": f"立即执行一次 {self.plugin_name} 缺失检测",
             },
         ]
 
@@ -951,9 +1028,9 @@ class GetMissingEpisodes(_PluginBase):
         # 如果获取失败，返回0
         return 0
 
-    def _update_config(self):
-        """更新配置"""
-        config = {
+    def _current_config(self) -> Dict[str, Any]:
+        """返回当前生效的完整插件配置。"""
+        return {
             "enabled": self._enabled,
             "cron": self._cron,
             "onlyonce": self._onlyonce,
@@ -966,9 +1043,205 @@ class GetMissingEpisodes(_PluginBase):
             "whitelist_media_servers": ",".join(self._whitelist_media_servers) if self._whitelist_media_servers else "",
             "auto_skip_finished": self._auto_skip_finished,
             "include_s00_season": self._include_s00_season,
+            "show_sidebar_nav": self._show_sidebar_nav,
         }
+
+    def _update_config(self):
+        """更新配置"""
+        config = self._current_config()
         logger.info(f"更新配置 {config}")
         self.update_config(config)
+
+    def _library_options(self) -> Tuple[List[str], List[str]]:
+        """获取媒体服务器名称与媒体库名称候选项。"""
+        mediaservers: List[str] = []
+        libraries: List[str] = []
+        try:
+            services = self._msHelper.get_services() or []
+        except Exception as e:
+            logger.error(f"获取媒体服务器列表失败: {str(e)}")
+            return [], []
+        for mediaserver in services:
+            if not mediaserver:
+                continue
+            mediaservers.append(mediaserver)
+            try:
+                for library in self._msChain.librarys(mediaserver) or []:
+                    if library and library.name:
+                        libraries.append(library.name)
+            except Exception as e:
+                logger.warning(f"获取 {mediaserver} 媒体库列表失败: {str(e)}")
+        return sorted(set(mediaservers)), sorted(set(libraries))
+
+    def _build_media_link(self, tmdbid: int) -> str:
+        """生成剧集在 MoviePilot 前端的媒体详情页链接。"""
+        link = f"#/media?mediaid=tmdb:{tmdbid}&type={MediaType.TV.value}"
+        mp_domain = settings.MP_DOMAIN()
+        if not mp_domain:
+            return link
+        if mp_domain.endswith("/"):
+            return f"{mp_domain}{link}"
+        return f"{mp_domain}/{link}"
+
+    def _build_board_data(self) -> Dict[str, Any]:
+        """构建 Vue 工作台需要的统计、记录与配置数据。"""
+        historys = self.get_data("history")
+        details = (historys or {}).get("details", {}) or {}
+
+        status_tags = {
+            HistoryStatus.FAILED.value: "failed",
+            HistoryStatus.ADDED_RSS.value: "added_rss",
+            HistoryStatus.ALL_EXIST.value: "all_exist",
+            HistoryStatus.NO_EXIST.value: "no_exist",
+        }
+        records: List[Dict[str, Any]] = []
+        for unique, item in details.items():
+            item = item or {}
+            tv_info = item.get("tv_no_exist_info") or {}
+            season_info = tv_info.get("season_episode_no_exist_info") or {}
+            seasons: List[Dict[str, Any]] = []
+            episode_missing = False
+            for season_key, season_value in season_info.items():
+                season_value = season_value or {}
+                no_exist = list(season_value.get("episode_no_exist") or [])
+                if no_exist:
+                    episode_missing = True
+                seasons.append(
+                    {
+                        "season": season_value.get("season", season_key),
+                        "episode_no_exist": no_exist,
+                        "episode_total": season_value.get("episode_total", 0),
+                        "episode_total_unfiltered": season_value.get("episode_total_unfiltered", 0),
+                    }
+                )
+            exist_status = item.get("exist_status") or HistoryStatus.UNKNOW.value
+            tmdbid = tv_info.get("tmdbid", 0) or 0
+            records.append(
+                {
+                    "unique": unique,
+                    "title": tv_info.get("title", "未知"),
+                    "year": tv_info.get("year", "未知"),
+                    "path": tv_info.get("path", "未知"),
+                    "tmdbid": tmdbid,
+                    "poster": tv_info.get("poster_path") or default_poster_path,
+                    "vote_average": tv_info.get("vote_average", 0.0),
+                    "last_air_date": tv_info.get("last_air_date", "未知"),
+                    "status": tv_info.get("status", "Unknown"),
+                    "status_cn": tv_info.get("status_cn", "未知"),
+                    "exist_status": exist_status,
+                    "skip": bool(item.get("skip", False)),
+                    "ignored_seasons": item.get("ignored_seasons") or [],
+                    "seasons": seasons,
+                    "episode_missing": episode_missing,
+                    "last_check": item.get("last_check", ""),
+                    "last_check_full": item.get("last_check_full", ""),
+                    "first_found_time": item.get("first_found_time", ""),
+                    "last_status_change": item.get("last_status_change", item.get("last_check_full", "")),
+                    "media_link": self._build_media_link(tmdbid),
+                }
+            )
+
+        records.sort(key=lambda record: record.get("last_status_change") or "", reverse=True)
+
+        statistics: Dict[str, int] = {
+            "all": len(records),
+            "total": 0,
+            "no_exist": 0,
+            "not_all_no_exist": 0,
+            "failed": 0,
+            "all_exist": 0,
+            "added_rss": 0,
+            "skipped": 0,
+            "finished": 0,
+        }
+        last_check = ""
+        for record in records:
+            tags: List[str] = ["all"]
+            if not record["skip"]:
+                tags.append("total")
+                statistics["total"] += 1
+            status_tag = status_tags.get(record["exist_status"])
+            if status_tag:
+                tags.append(status_tag)
+                statistics[status_tag] += 1
+            if record["skip"]:
+                tags.append("skipped")
+                statistics["skipped"] += 1
+            if record["status_cn"] == "已完结":
+                tags.append("finished")
+                statistics["finished"] += 1
+            if status_tag == "no_exist" and record["episode_missing"]:
+                tags.append("not_all_no_exist")
+                statistics["not_all_no_exist"] += 1
+            record["tags"] = tags
+            if record.get("last_check_full") and record["last_check_full"] > last_check:
+                last_check = record["last_check_full"]
+
+        mediaserver_options, library_options = self._library_options()
+        return {
+            "config": self._current_config(),
+            "library_options": library_options,
+            "mediaserver_options": mediaserver_options,
+            "statistics": statistics,
+            "items": records,
+            "history_type": self._current_history_type,
+            "running": self._checking,
+            "enabled": self._enabled,
+            "cron": self._cron,
+            "last_check": last_check,
+        }
+
+    def get_status(self) -> schemas.Response:
+        """返回 Vue 工作台总览数据。"""
+        try:
+            return schemas.Response(success=True, data=self._build_board_data())
+        except Exception as e:
+            logger.error(f"获取剧集管家总览数据失败: {str(e)}")
+            return schemas.Response(success=False, message=f"获取总览数据失败: {str(e)}")
+
+    def update_settings(self, payload: Dict[str, Any]) -> schemas.Response:
+        """保存 Vue 工作台提交的插件设置并重建运行服务。"""
+        if not isinstance(payload, dict):
+            return schemas.Response(success=False, message="配置格式不正确")
+        config = self._current_config()
+        for key in self._EDITABLE_SETTINGS_KEYS:
+            if key in payload:
+                config[key] = payload[key]
+        if isinstance(config.get("save_path_replaces"), list):
+            config["save_path_replaces"] = "\n".join(
+                str(line).strip() for line in config["save_path_replaces"] if str(line).strip()
+            )
+        try:
+            self._load_config(config)
+            self._update_config()
+            self.stop_service()
+            if self._enabled or self._onlyonce:
+                self._start_service()
+            return schemas.Response(
+                success=True,
+                message="设置已保存",
+                data=self._build_board_data(),
+            )
+        except Exception as e:
+            logger.error(f"保存剧集管家设置失败: {str(e)}")
+            return schemas.Response(success=False, message=f"保存设置失败: {str(e)}")
+
+    def run_check_now(self) -> schemas.Response:
+        """在后台线程中立即执行一次缺失检测。"""
+        if self._checking:
+            return schemas.Response(success=False, message="检测正在进行中，请稍后再试")
+        Thread(target=self.__run_check_thread, daemon=True).start()
+        return schemas.Response(success=True, message="已触发一次检测")
+
+    def __run_check_thread(self):
+        """执行一次检测并维护运行状态标记。"""
+        self._checking = True
+        try:
+            self.__refresh()
+        except Exception as e:
+            logger.error(f"手动触发检测失败: {str(e)}")
+        finally:
+            self._checking = False
 
     def stop_service(self):
         """停止服务"""
@@ -1147,10 +1420,10 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"unique: {unique} 不在历史记录里")
             return False, historys
 
-    def delete_history(self, key: str, apikey: str):
+    def delete_history(self, key: str, apikey: Optional[str] = None):
         """删除同步检查记录"""
         logger.info(f"开始删除检查记录: {key}")
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
             
@@ -1169,10 +1442,10 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"删除检查记录 {key} 失败")
             return schemas.Response(success=False, message="删除失败")
 
-    def add_subscribe_history(self, key: str, apikey: str):
+    def add_subscribe_history(self, key: str, apikey: Optional[str] = None):
         """订阅缺失检查记录"""
         logger.info(f"开始订阅检查记录: {key}")
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
             
@@ -1190,10 +1463,10 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"添加 {key} 订阅失败")
             return schemas.Response(success=False, message="订阅失败")
 
-    def set_all_exist_history(self, key: str, apikey: str):
+    def set_all_exist_history(self, key: str, apikey: Optional[str] = None):
         """标记存在检查记录：将当前缺失的季加入忽略列表，并更新状态为全部存在"""
         logger.info(f"开始标记存在检查记录: {key}")
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
             
@@ -1235,10 +1508,10 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"标记存在 {key} 失败")
             return schemas.Response(success=False, message="标记存在失败")
 
-    def toggle_skip_history(self, key: str, apikey: str):
+    def toggle_skip_history(self, key: str, apikey: Optional[str] = None):
         """切换跳过状态"""
         logger.info(f"开始切换跳过状态: {key}")
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
             
@@ -1261,10 +1534,10 @@ class GetMissingEpisodes(_PluginBase):
             logger.warning(f"切换跳过状态 {key} 失败")
             return schemas.Response(success=False, message="切换跳过状态失败")
 
-    def set_history_type(self, history_type: str, apikey: str):
+    def set_history_type(self, history_type: str, apikey: Optional[str] = None):
         """设置历史数据类型"""
         logger.info(f"设置历史数据类型: {history_type}")
-        if apikey != settings.API_TOKEN:
+        if apikey and apikey != settings.API_TOKEN:
             logger.warning("API密钥错误")
             return schemas.Response(success=False, message="API密钥错误")
         
@@ -1540,6 +1813,7 @@ class GetMissingEpisodes(_PluginBase):
             "only_aired": True,
             "auto_skip_finished": False,
             "include_s00_season": False,
+            "show_sidebar_nav": True,
             "clear": False,
             "no_exist_action": NoExistAction.ONLY_HISTORY.value,
             "save_path_replaces": "",
@@ -2087,7 +2361,11 @@ class GetMissingEpisodes(_PluginBase):
         return component
 
     def get_page(self) -> List[Dict[str, Any]]:
-        """拼装插件详情页面, 需要返回页面配置, 同时附带数据"""
+        """Vue 工作台由联邦组件渲染，不再返回 Vuetify JSON 页面。"""
+        return []
+
+    def __get_legacy_page(self) -> List[Dict[str, Any]]:
+        """保留原 Vuetify JSON 详情页实现，用于回退 vuetify 渲染模式。"""
         # 查询检查记录
         historys = self.get_data("history")
 
