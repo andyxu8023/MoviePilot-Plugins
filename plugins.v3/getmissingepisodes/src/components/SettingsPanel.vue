@@ -8,9 +8,11 @@ const props = defineProps({
   config: { type: Object, default: () => ({}) },
   libraryOptions: { type: Array, default: () => [] },
   mediaserverOptions: { type: Array, default: () => [] },
+  // host：交给宿主标准 save 流程（由宿主写配置并弹出保存通知）；api：组件自行调用插件接口保存
+  submitMode: { type: String, default: 'api' },
 })
 
-const emit = defineEmits(['saved', 'message'])
+const emit = defineEmits(['saved', 'message', 'submit'])
 
 const saving = ref(false)
 const base = computed(() => `plugin/${props.pluginId}`)
@@ -74,6 +76,10 @@ async function save() {
     const payload = { ...draft }
     payload.whitelist_media_servers = toList(payload.whitelist_media_servers).join(',')
     payload.whitelist_librarys = toList(payload.whitelist_librarys)
+    if (props.submitMode === 'host') {
+      emit('submit', payload)
+      return
+    }
     const data = unwrapResponse(await props.api.post(`${base.value}/settings`, payload))
     emit('saved', data)
     emit('message', { text: '设置已保存', color: 'success' })

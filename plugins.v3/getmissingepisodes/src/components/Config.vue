@@ -9,7 +9,7 @@ const props = defineProps({
   pluginId: { type: String, default: 'GetMissingEpisodes' },
 })
 
-const emit = defineEmits(['layout', 'close'])
+const emit = defineEmits(['layout', 'close', 'save'])
 
 const base = computed(() => `plugin/${props.pluginId || 'GetMissingEpisodes'}`)
 const loading = ref(true)
@@ -39,6 +39,11 @@ onMounted(() => {
   emit('layout', { maxWidth: '56rem' })
   loadOptions()
 })
+
+/** 宿主配置弹窗走标准 save 事件，由宿主写配置并弹出保存通知。 */
+function submitToHost(payload) {
+  emit('save', { ...(props.initialConfig || {}), ...payload })
+}
 </script>
 
 <template>
@@ -46,7 +51,7 @@ onMounted(() => {
     <div class="d-flex align-center justify-space-between mb-2">
       <div class="text-subtitle-1">
         剧集管家设置
-        <span class="text-caption gme-muted ml-2">界面已升级为独立工作台，保存后立即生效</span>
+        <span class="text-caption gme-muted ml-2">保存后由系统写入配置并重新加载插件</span>
       </div>
       <VBtn v-if="!loading" icon="mdi-refresh" variant="text" size="small" @click="loadOptions" />
     </div>
@@ -61,6 +66,8 @@ onMounted(() => {
       :config="options.config"
       :library-options="options.library_options"
       :mediaserver-options="options.mediaserver_options"
+      submit-mode="host"
+      @submit="submitToHost"
       @message="payload => { message = payload.text; messageType = payload.color === 'error' ? 'error' : 'success' }"
       @close="$emit('close')"
     />
