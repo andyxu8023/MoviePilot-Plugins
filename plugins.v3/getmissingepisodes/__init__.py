@@ -174,7 +174,7 @@ class SVGPaths:
 
 
 class GetMissingEpisodes(_PluginBase):
-    plugin_name = "剧集管家"
+    plugin_name = "剧集管家💻"
     plugin_desc = "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全"
     plugin_icon = "https://raw.githubusercontent.com/boeto/MoviePilot-Plugins/main/icons/EpisodeNoExist.png"
     plugin_version = "3.1.0"
