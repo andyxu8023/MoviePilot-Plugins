@@ -297,7 +297,7 @@ onUnmounted(() => stopPolling())
 
     <VRow dense>
       <VCol v-for="raw in pagedItems" :key="raw.unique" cols="12" sm="6" md="4" lg="3" xl="3">
-        <VCard variant="tonal" class="gme-card h-100">
+        <VCard variant="tonal" class="gme-card h-100 d-flex flex-column">
           <div class="gme-card__body">
             <VImg
               :src="decorate(raw).poster"
@@ -461,6 +461,7 @@ onUnmounted(() => stopPolling())
   display: flex;
   gap: 10px;
   padding: 10px;
+  flex: 1 1 auto;
 }
 .gme-card__poster {
   border-radius: 6px;
