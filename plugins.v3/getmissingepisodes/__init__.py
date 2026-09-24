@@ -2321,7 +2321,7 @@ class GetMissingEpisodes(_PluginBase):
                 "history_type": HistoryDataType.ALL_EXIST.value,
             },
             {
-                "title": "已订阅",
+                "title": "今日订阅",
                 "value": f"{historys_added_rss_total}部",
                 "icon_name": Icons.ADD_SCHEDULE,
                 "history_type": HistoryDataType.ADDED_RSS.value,
