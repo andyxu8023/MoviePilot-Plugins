@@ -5,13 +5,11 @@ const {openBlock:_openBlock,createBlock:_createBlock} = await importShared('vue'
 
 
 const _sfc_main = {
-  __name: 'AppPage',
+  __name: 'Page',
   props: {
   api: { type: Object, default: () => ({}) },
-  navKey: { type: String, default: 'main' },
-  pluginId: { type: String, default: 'GetMissingEpisodes' },
 },
-  emits: ['action'],
+  emits: ['action', 'close'],
   setup(__props) {
 
 
@@ -21,10 +19,12 @@ const _sfc_main = {
 return (_ctx, _cache) => {
   return (_openBlock(), _createBlock(EpisodeManager, {
     api: __props.api,
-    "plugin-id": __props.pluginId,
-    "nav-key": __props.navKey,
-    onAction: _cache[0] || (_cache[0] = $event => (_ctx.$emit('action')))
-  }, null, 8, ["api", "plugin-id", "nav-key"]))
+    "plugin-id": "GetMissingEpisodes",
+    compact: "",
+    "show-close": "",
+    onAction: _cache[0] || (_cache[0] = $event => (_ctx.$emit('action'))),
+    onClose: _cache[1] || (_cache[1] = $event => (_ctx.$emit('close')))
+  }, null, 8, ["api"]))
 }
 }
 
