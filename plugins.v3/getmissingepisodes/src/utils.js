@@ -21,7 +21,7 @@ export const filterTabs = [
   { key: 'skipped', title: '已跳过', icon: 'mdi-skip-next-outline', color: 'secondary' },
   { key: 'no_exist', title: '存在缺失', icon: 'mdi-alert-outline', color: 'warning' },
   { key: 'not_all_no_exist', title: '已有季缺失', icon: 'mdi-target', color: 'error' },
-  { key: 'added_rss', title: '已订阅', icon: 'mdi-rss', color: 'info' },
+  { key: 'added_rss', title: '今日订阅', icon: 'mdi-rss', color: 'info' },
   { key: 'failed', title: '未识别', icon: 'mdi-bug-outline', color: 'error' },
 ]
 
