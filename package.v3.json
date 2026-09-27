@@ -3,12 +3,13 @@
     "name": "剧集管家",
     "description": "检测指定剧集库，对有新季或存在集缺失的剧集自动订阅补全",
     "labels": "订阅",
-    "version": "3.1.3",
+    "version": "3.1.4",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
     "author": "boeto，左岸",
     "level": 2,
     "system_version": ">=3.0.1",
     "history": {
+      "v3.1.4": "设置中的执行周期改为弹窗选择组件",
       "v3.1.3": "修复数据页清空搜索框后列表无法恢复的问题",
       "v3.1.2": "修复从插件页进入设置弹窗无关闭按钮的问题，配置表单底部与标题栏均提供关闭入口",
       "v3.1.1": "优化界面显示",
@@ -37,12 +38,13 @@
     "name": "魔力值自动兑换",
     "description": "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)",
     "labels": "站点,自动化,魔力",
-    "version": "2.0.1",
+    "version": "2.0.2",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png",
     "author": "左岸",
     "level": 2,
     "system_version": ">=2.12.0",
     "history": {
+      "v2.0.2": "设置中的执行周期改为弹窗选择组件",
       "v2.0.1": "目前已知支持站点：红豆饭，AGSVPT，高清时间，高清视界，铂金家，萝莉，PT时间，高清杜比(需要配置cookie)，憨憨，青蛙，海胆之家。不支持站点：馒头。",
       "v1.0.0": "初始版本"
     }
