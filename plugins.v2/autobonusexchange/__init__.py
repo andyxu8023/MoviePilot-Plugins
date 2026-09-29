@@ -30,13 +30,13 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换"
+    plugin_name = "魔力值自动兑换💻"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.0.4"
+    plugin_version = "2.0.5"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -402,60 +402,60 @@ class AutoBonusExchange(_PluginBase):
         def _fmt_bonus(value) -> str:
             """未取到魔力值时显示占位符，避免看起来像被清零。"""
             return f"{value}" if value else "—"
+
         for site_name, result in today_data.get("results", {}).items():
             status = result.get("status", "unknown")
-            bonus_before = result.get("bonus_before", 0)
-            bonus_after = result.get("bonus_after", 0)
-            exchanged = result.get("exchanged", [])
+            exchanged = result.get("exchanged") or []
+            attempts = result.get("attempts") or []
             status_text = {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(status, "未知")
             status_color = "success" if status == "success" else "error" if status == "failed" else "warning"
 
-            subtitles = [f"魔力值: {_fmt_bonus(bonus_before)} → {_fmt_bonus(bonus_after)}"]
+            texts = [f"魔力值: {_fmt_bonus(result.get('bonus_before', 0))} → "
+                     f"{_fmt_bonus(result.get('bonus_after', 0))}"]
+            grouped: Dict[str, dict] = {}
+            for ex in exchanged:
+                key = f"{ex.get('item', '')}|{ex.get('cost', 0)}"
+                row = grouped.setdefault(key, {
+                    "item": ex.get("item", ""),
+                    "cost": ex.get("cost", 0) or 0,
+                    "count": 0,
+                })
+                row["count"] += 1
+            for row in grouped.values():
+                # 同档位多笔合并成一行，移动端不至于被重复条目刷屏
+                texts.append(f"已兑换: {row['item']} × {row['count']}，单价 {row['cost']}，"
+                             f"共消耗 {round(row['cost'] * row['count'], 2)}")
+            for attempt in attempts:
+                if attempt.get("success"):
+                    continue
+                texts.append(f"未落地: {attempt.get('item', '')} - "
+                             f"{attempt.get('detail') or '兑换未生效'}")
             if result.get("error"):
-                subtitles.append(f"原因: {result.get('error')}")
-            if result.get("note"):
-                subtitles.append(f"说明: {result.get('note')}")
+                texts.append(f"原因: {result.get('error')}")
+            if result.get("note") and not any(not a.get("success") for a in attempts):
+                texts.append(f"说明: {result.get('note')}")
+
+            content = [{
+                "component": "VListItemTitle",
+                "content": [{
+                    "component": "VChip",
+                    "props": {"color": status_color, "size": "small"},
+                    "text": status_text
+                }]
+            }]
+            # 每条信息一行，长句由浏览器按容器宽度自动换行（桌面端不再被固定列宽截断）
+            for text in texts:
+                content.append({
+                    "component": "VListItemSubtitle",
+                    "props": {"class": "text-break", "style": self._WRAP_STYLE},
+                    "text": text
+                })
 
             items.append({
                 "component": "VListItem",
                 "props": {"title": site_name},
-                "content": [
-                    {
-                        "component": "VListItemTitle",
-                        "content": [{
-                            "component": "VChip",
-                            "props": {"color": status_color, "size": "small"},
-                            "text": status_text
-                        }]
-                    }
-                ] + [
-                    {"component": "VListItemSubtitle", "text": text} for text in subtitles
-                ]
+                "content": content
             })
-
-            # 兑换成功明细
-            for ex in exchanged:
-                items.append({
-                    "component": "VListItem",
-                    "props": {"title": f"  - {ex.get('item', '')}"},
-                    "content": [{
-                        "component": "VListItemSubtitle",
-                        "text": f"消耗: {ex.get('cost', 0)}, 获得: {ex.get('gain') or ex.get('item', '')}"
-                    }]
-                })
-
-            # 未落地的兑换逐条说明原因
-            for attempt in result.get("attempts", []):
-                if attempt.get("success"):
-                    continue
-                items.append({
-                    "component": "VListItem",
-                    "props": {"title": f"  - {attempt.get('item', '')}（未落地）"},
-                    "content": [{
-                        "component": "VListItemSubtitle",
-                        "text": attempt.get("detail") or "兑换未生效"
-                    }]
-                })
 
         return [{
             "component": "VCard",
@@ -845,14 +845,14 @@ class AutoBonusExchange(_PluginBase):
         type_name = type_names.get(self._exchange_type, self._exchange_type)
         traffic_items = self._filter_traffic_items(items)
         if not traffic_items:
-            return (f"商店里没有「{type_name}」类档位，当前兑换类型设置为 {self._exchange_type}，"
+            return (f"商店里没有「{type_name}」类档位，当前兑换类型设置为 {self._exchange_type}\n"
                     f"可改为「上传量/下载量」或换档位")
 
         usable_items = [item for item in traffic_items if item.get("available", True)]
         if not usable_items:
             tiers = "、".join([f"{item.get('name')}({item.get('cost')})" for item in traffic_items[:3]])
-            return (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、"
-                    f"等级或次数受限）：{tiers}")
+            return (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、等级或次数受限）\n"
+                    f"禁用档位: {tiers}")
 
         min_cost = min(item.get("cost", 0) for item in usable_items)
         current_bonus = bonus_info.get("current_bonus", 0) or 0
@@ -860,6 +860,10 @@ class AutoBonusExchange(_PluginBase):
             return (f"可用魔力值不足：余额 {current_bonus} - 保留值 {self._keep_balance} = "
                     f"{round(current_bonus - self._keep_balance, 2)}，低于最低档位消耗 {min_cost}")
         return f"最低档位消耗 {min_cost}，超过当前余额 {current_bonus}"
+
+    # 列表文本交给浏览器按容器宽度自动换行，覆盖 Vuetify 默认的单行截断样式
+    _WRAP_STYLE = ("display:block;white-space:normal;overflow:visible;"
+                   "text-overflow:clip;-webkit-line-clamp:unset")
 
     def _filter_traffic_items(self, items: List[dict]) -> List[dict]:
         """根据兑换类型筛选流量项目。"""
@@ -1121,13 +1125,16 @@ class AutoBonusExchange(_PluginBase):
                 total_cost = sum(e.get("cost") or 0 for e in exchanged)
                 gains = "、".join([e.get("gain") or e.get("item") or "" for e in exchanged])
                 text = f"兑换 {len(exchanged)} 笔，消耗 {total_cost}，获得 {gains}"
-                if site_result.get("note"):
-                    text += f"；{site_result.get('note')}"
+                note = str(site_result.get("note") or "").replace("\n", "；")
+                if note:
+                    text += f"；{note}"
                 lines.append(f"{site_name}: {text}")
             elif status == "failed":
-                lines.append(f"{site_name}: 失败 - {site_result.get('error') or '未知原因'}")
+                reason = str(site_result.get("error") or "未知原因").replace("\n", "；")
+                lines.append(f"{site_name}: 失败 - {reason}")
             else:
-                lines.append(f"{site_name}: 跳过 - {site_result.get('error') or '无兑换动作'}")
+                reason = str(site_result.get("error") or "无兑换动作").replace("\n", "；")
+                lines.append(f"{site_name}: 跳过 - {reason}")
         message = "\n".join(lines)
 
         self.post_message(
