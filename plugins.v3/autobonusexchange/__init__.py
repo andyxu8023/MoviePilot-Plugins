@@ -36,7 +36,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.0.2"
+    plugin_version = "2.0.4"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -398,14 +398,23 @@ class AutoBonusExchange(_PluginBase):
 
         # 构建详情列表
         items = []
+
+        def _fmt_bonus(value) -> str:
+            """未取到魔力值时显示占位符，避免看起来像被清零。"""
+            return f"{value}" if value else "—"
         for site_name, result in today_data.get("results", {}).items():
             status = result.get("status", "unknown")
             bonus_before = result.get("bonus_before", 0)
             bonus_after = result.get("bonus_after", 0)
             exchanged = result.get("exchanged", [])
-
-            status_text = "成功" if status == "success" else "失败" if status == "failed" else "跳过"
+            status_text = {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(status, "未知")
             status_color = "success" if status == "success" else "error" if status == "failed" else "warning"
+
+            subtitles = [f"魔力值: {_fmt_bonus(bonus_before)} → {_fmt_bonus(bonus_after)}"]
+            if result.get("error"):
+                subtitles.append(f"原因: {result.get('error')}")
+            if result.get("note"):
+                subtitles.append(f"说明: {result.get('note')}")
 
             items.append({
                 "component": "VListItem",
@@ -418,22 +427,33 @@ class AutoBonusExchange(_PluginBase):
                             "props": {"color": status_color, "size": "small"},
                             "text": status_text
                         }]
-                    },
-                    {
-                        "component": "VListItemSubtitle",
-                        "text": f"魔力值: {bonus_before} → {bonus_after}"
                     }
+                ] + [
+                    {"component": "VListItemSubtitle", "text": text} for text in subtitles
                 ]
             })
 
-            # 兑换详情
+            # 兑换成功明细
             for ex in exchanged:
                 items.append({
                     "component": "VListItem",
                     "props": {"title": f"  - {ex.get('item', '')}"},
                     "content": [{
                         "component": "VListItemSubtitle",
-                        "text": f"消耗: {ex.get('cost', 0)}, 获得: {ex.get('gain', '')}"
+                        "text": f"消耗: {ex.get('cost', 0)}, 获得: {ex.get('gain') or ex.get('item', '')}"
+                    }]
+                })
+
+            # 未落地的兑换逐条说明原因
+            for attempt in result.get("attempts", []):
+                if attempt.get("success"):
+                    continue
+                items.append({
+                    "component": "VListItem",
+                    "props": {"title": f"  - {attempt.get('item', '')}（未落地）"},
+                    "content": [{
+                        "component": "VListItemSubtitle",
+                        "text": attempt.get("detail") or "兑换未生效"
                     }]
                 })
 
@@ -529,13 +549,16 @@ class AutoBonusExchange(_PluginBase):
             "bonus_after": 0,
             "exchanged": [],
             "error": None,
+            "note": None,
+            "attempts": [],
         }
 
         try:
             # 检查熔断器
             if self._check_circuit_breaker(site_name):
                 result["status"] = "skipped"
-                result["error"] = "站点已触发熔断，跳过"
+                result["error"] = (f"本轮该站已连续失败 {self._circuit_breaker.get(site_name, 0)} 次，"
+                                   f"达到熔断阈值 {self._circuit_break_threshold}，跳过")
                 logger.warn(f"{site_name} 已触发熔断，跳过兑换")
                 return site_name, result
 
@@ -627,7 +650,10 @@ class AutoBonusExchange(_PluginBase):
             
             if not res or res.status_code != 200:
                 result["status"] = "failed"
-                result["error"] = f"获取魔力商店失败，状态码: {res.status_code if res else 'None'}"
+                if res is None:
+                    result["error"] = "获取魔力商店失败：请求无响应（网络不通、超时或被站点拒绝，Cookie 可能已失效）"
+                else:
+                    result["error"] = f"获取魔力商店失败：状态码 {res.status_code}（多为 Cookie 失效或被站点拦截）"
                 logger.warn(f"{site_name} 获取魔力商店失败")
                 self._record_circuit_break(site_name)
                 return site_name, result
@@ -675,11 +701,14 @@ class AutoBonusExchange(_PluginBase):
                 return site_name, result
 
             result["bonus_before"] = bonus_info.get("current_bonus", 0)
+            # 没有发生兑换时余额不变，跳过/失败的记录也要给出变化后的值
+            result["bonus_after"] = result["bonus_before"]
 
             # 检查魔力值是否足够
             if bonus_info.get("current_bonus", 0) <= self._keep_balance:
                 result["status"] = "skipped"
-                result["error"] = f"当前魔力值 {bonus_info.get('current_bonus')} 不足或低于保留值 {self._keep_balance}"
+                result["error"] = (f"当前魔力值 {bonus_info.get('current_bonus')} 未超过保留值 "
+                                   f"{self._keep_balance}，按设置不兑换")
                 logger.info(f"{site_name} 魔力值不足，跳过")
                 return site_name, result
 
@@ -688,11 +717,12 @@ class AutoBonusExchange(_PluginBase):
 
             if not exchange_plan:
                 result["status"] = "skipped"
-                result["error"] = "无可用兑换方案"
-                logger.info(f"{site_name} 无可用兑换方案")
+                result["error"] = self._diagnose_no_plan(bonus_info)
+                logger.info(f"{site_name} 无可用兑换方案: {result['error']}")
                 return site_name, result
 
             # 执行兑换
+            running_bonus = bonus_info.get("current_bonus", 0) or 0
             for item in exchange_plan:
                 # 检查项目是否可用
                 if not item.get("available", True):
@@ -700,6 +730,7 @@ class AutoBonusExchange(_PluginBase):
                     continue
                 
                 # 如果是API模式，使用API兑换
+                bonus_of_item = running_bonus
                 if is_api_mode:
                     exchange_result = self._exchange_api_item(
                         req_utils=req_utils,
@@ -714,7 +745,8 @@ class AutoBonusExchange(_PluginBase):
                         bonus_url=bonus_url,
                         item_id=item.get("option"),
                         item_name=item.get("name"),
-                        cost=item.get("cost")
+                        cost=item.get("cost"),
+                        bonus_before=bonus_of_item
                     )
 
                 if exchange_result.get("success"):
@@ -723,12 +755,35 @@ class AutoBonusExchange(_PluginBase):
                         "cost": item.get("cost"),
                         "gain": item.get("gain", ""),
                     })
+                    result["attempts"].append({
+                        "item": item.get("name"),
+                        "cost": item.get("cost"),
+                        "success": True,
+                        "detail": (f"扣除 {exchange_result.get('deduct', item.get('cost'))}，"
+                                   f"余额 {bonus_of_item} → {exchange_result.get('bonus_after') or '未知'}")
+                    })
                     logger.info(f"{site_name} 兑换成功: {item.get('name')} (消耗: {item.get('cost')})")
+                    # 用站点确认后的余额继续比对下一笔，取不到就按消耗推算
+                    observed_bonus = exchange_result.get("bonus_after")
+                    running_bonus = observed_bonus if observed_bonus else running_bonus - (item.get("cost") or 0)
                     # 限速
                     time.sleep(self._rate_limit_ms / 1000)
                 else:
-                    logger.warn(f"{site_name} 兑换 {item.get('name')} 失败: {exchange_result.get('error')}")
+                    fail_detail = (f"{exchange_result.get('error')}（余额 {bonus_of_item} → "
+                                   f"{exchange_result.get('bonus_after') or '未知'}）")
+                    result["attempts"].append({
+                        "item": item.get("name"),
+                        "cost": item.get("cost"),
+                        "success": False,
+                        "detail": fail_detail
+                    })
+                    logger.warn(f"{site_name} 兑换 {item.get('name')} 失败: {fail_detail}，停止本站本轮兑换")
                     self._record_circuit_break(site_name)
+                    if result["exchanged"]:
+                        result["note"] = f"成功 {len(result['exchanged'])} 笔后停止：{fail_detail}"
+                    else:
+                        result["error"] = f"{item.get('name')} 兑换失败：{fail_detail}"
+                    break
 
             # 重新获取魔力值
             res = req_utils.get_res(url=bonus_url)
@@ -740,7 +795,7 @@ class AutoBonusExchange(_PluginBase):
                 if new_bonus_info:
                     result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
 
-            result["status"] = "success" if result["exchanged"] else "skipped"
+            result["status"] = "success" if result["exchanged"] else ("failed" if result.get("error") else "skipped")
 
         except Exception as e:
             result["status"] = "failed"
@@ -774,6 +829,37 @@ class AutoBonusExchange(_PluginBase):
             plan = self._keep_balance_strategy(available_items, current_bonus)
 
         return plan
+
+    def _diagnose_no_plan(self, bonus_info: dict) -> str:
+        """
+        说明为什么算不出兑换方案，让记录里能直接看到原因而不是一句「无可用兑换方案」。
+
+        :param bonus_info: 魔力商店信息
+        :return: 原因描述
+        """
+        items = bonus_info.get("available_items") or []
+        if not items:
+            return "魔力商店没有解析到兑换项（站点商店结构不被适配器支持，或 Cookie 已失效取到的是登录页）"
+
+        type_names = {"upload": "上传量", "download": "下载量", "both": "上传量/下载量"}
+        type_name = type_names.get(self._exchange_type, self._exchange_type)
+        traffic_items = self._filter_traffic_items(items)
+        if not traffic_items:
+            return (f"商店里没有「{type_name}」类档位，当前兑换类型设置为 {self._exchange_type}，"
+                    f"可改为「上传量/下载量」或换档位")
+
+        usable_items = [item for item in traffic_items if item.get("available", True)]
+        if not usable_items:
+            tiers = "、".join([f"{item.get('name')}({item.get('cost')})" for item in traffic_items[:3]])
+            return (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、"
+                    f"等级或次数受限）：{tiers}")
+
+        min_cost = min(item.get("cost", 0) for item in usable_items)
+        current_bonus = bonus_info.get("current_bonus", 0) or 0
+        if self._strategy == "keep_balance":
+            return (f"可用魔力值不足：余额 {current_bonus} - 保留值 {self._keep_balance} = "
+                    f"{round(current_bonus - self._keep_balance, 2)}，低于最低档位消耗 {min_cost}")
+        return f"最低档位消耗 {min_cost}，超过当前余额 {current_bonus}"
 
     def _filter_traffic_items(self, items: List[dict]) -> List[dict]:
         """根据兑换类型筛选流量项目。"""
@@ -1027,7 +1113,22 @@ class AutoBonusExchange(_PluginBase):
         failed_count = sum(1 for r in results.values() if r.get("status") == "failed")
         skipped_count = sum(1 for r in results.values() if r.get("status") == "skipped")
 
-        message = f"成功: {success_count}, 失败: {failed_count}, 跳过: {skipped_count}"
+        lines = [f"成功: {success_count}, 失败: {failed_count}, 跳过: {skipped_count}"]
+        for site_name, site_result in results.items():
+            status = site_result.get("status")
+            exchanged = site_result.get("exchanged") or []
+            if status == "success":
+                total_cost = sum(e.get("cost") or 0 for e in exchanged)
+                gains = "、".join([e.get("gain") or e.get("item") or "" for e in exchanged])
+                text = f"兑换 {len(exchanged)} 笔，消耗 {total_cost}，获得 {gains}"
+                if site_result.get("note"):
+                    text += f"；{site_result.get('note')}"
+                lines.append(f"{site_name}: {text}")
+            elif status == "failed":
+                lines.append(f"{site_name}: 失败 - {site_result.get('error') or '未知原因'}")
+            else:
+                lines.append(f"{site_name}: 跳过 - {site_result.get('error') or '无兑换动作'}")
+        message = "\n".join(lines)
 
         self.post_message(
             mtype=NotificationType.SiteMessage,
@@ -1038,6 +1139,9 @@ class AutoBonusExchange(_PluginBase):
 
 class NexusPHPBonusAdapter:
     """NexusPHP 魔力商店适配器。"""
+
+    # 判定兑换真实落地所需的最小扣费比例（容忍站点同时产生的做种收益）
+    _MIN_DEDUCT_RATIO = 0.5
 
     def parse_bonus_page(self, html: str) -> Optional[dict]:
         """
@@ -1190,7 +1294,8 @@ class NexusPHPBonusAdapter:
         return 0
 
     def exchange_item(self, req_utils: RequestUtils, bonus_url: str, item_id: int,
-                      item_name: str, cost: float) -> dict:
+                      item_name: str, cost: float,
+                      bonus_before: Optional[float] = None) -> dict:
         """
         执行单个兑换操作。
 
@@ -1199,10 +1304,11 @@ class NexusPHPBonusAdapter:
         :param item_id: 兑换选项 ID
         :param item_name: 兑换项名称
         :param cost: 消耗魔力值
+        :param bonus_before: 兑换前的魔力值，用于比对是否真实扣费
         :return: 兑换结果
         """
         try:
-            logger.info(f"开始兑换: {item_name} (消耗: {cost})")
+            logger.info(f"开始兑换: {item_name} (消耗: {cost}, 兑换前余额: {bonus_before})")
 
             # POST 请求兑换 - 格式: ?action=exchange, option=X
             exchange_url = f"{bonus_url}?action=exchange"
@@ -1224,54 +1330,88 @@ class NexusPHPBonusAdapter:
             # 调试：记录响应片段
             logger.debug(f"{item_name} 兑换响应前500字符: {res.text[:500]}")
 
-            # 检查是否有错误提示（优先检查错误）
-            error_keywords = [
-                "失败", "error", "不足", "分享率已很高", "需要更多魔力值",
-                "disabled", "不允许", "无法兑换", "兑换失败", "权限不足",
-                "等级不够", "余额不足", "魔力值不足"
-            ]
-            response_lower = res.text.lower()
-            for keyword in error_keywords:
-                if keyword.lower() in response_lower:
-                    # 提取错误信息
-                    error_match = re.search(rf'{keyword}[：:]\s*([^<]+)', res.text, re.IGNORECASE)
-                    error_msg = error_match.group(1).strip() if error_match else keyword
-                    logger.warn(f"{item_name} 兑换失败: {error_msg}")
-                    return {"success": False, "error": error_msg}
+            # 以「兑换前后余额差」判定结果：站点是否真实扣费才是唯一可靠依据
+            new_bonus = self._parse_page_bonus(res.text)
 
-            # 检查是否兑换成功
-            success_keywords = ["成功", "success", "兑换完成", "交易完成"]
-            for keyword in success_keywords:
-                if keyword.lower() in response_lower:
-                    logger.info(f"兑换成功: {item_name}")
-                    return {"success": True}
+            if bonus_before is not None and cost and cost > 0:
+                threshold = cost * self._MIN_DEDUCT_RATIO
+                deducted = bonus_before - new_bonus if new_bonus is not None else None
+                if deducted is None or deducted < threshold:
+                    # 响应页看不出扣费，站点可能返回跳转前的页面，重抓商店页再确认
+                    for wait_seconds in (1, 3):
+                        time.sleep(wait_seconds)
+                        check_res = req_utils.get_res(url=bonus_url)
+                        if not check_res or check_res.status_code != 200:
+                            continue
+                        refetched = self._parse_page_bonus(check_res.text)
+                        if refetched is None:
+                            continue
+                        new_bonus = refetched
+                        deducted = bonus_before - new_bonus
+                        if deducted >= threshold:
+                            break
+                if deducted is not None and deducted >= threshold:
+                    logger.info(f"{item_name} 兑换成功: 余额 {bonus_before} → {new_bonus}，实际扣除 {round(deducted, 2)}")
+                    return {"success": True, "bonus_after": new_bonus, "deduct": round(deducted, 2)}
+                error_msg = self._extract_notice(res.text) or "魔力值未减少"
+                logger.warn(f"{item_name} 兑换失败: {error_msg}（余额 {bonus_before} → {new_bonus}）")
+                return {"success": False, "error": error_msg, "bonus_after": new_bonus}
 
-            # 检查魔力值是否减少（通过检查页面中的魔力值）
-            # 如果响应中包含魔力值，且比兑换前少，则认为成功
-            bonus_patterns = [
-                r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
-                r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
-                r'当前([\d][\d,.]*\d)',
-                r'魔力值[^:]*[：:]\s*([\d][\d,.]*\d)',
-            ]
-            for pattern in bonus_patterns:
-                bonus_match = re.search(pattern, res.text, re.IGNORECASE)
-                if bonus_match:
-                    bonus_str = bonus_match.group(1).replace(",", "")
-                    try:
-                        new_bonus = float(bonus_str)
-                        # 如果新魔力值比消耗后还多，说明兑换失败
-                        # 这里无法获取兑换前的值，所以只做简单检查
-                        if new_bonus > cost * 10:  # 如果魔力值远大于消耗，可能兑换失败
-                            logger.warn(f"{item_name} 兑换可能失败: 魔力值未减少")
-                            return {"success": False, "error": "魔力值未减少"}
-                    except ValueError:
-                        pass
-                    break
-
-            # 默认认为成功（NexusPHP 通常返回原页面）
-            logger.debug(f"{item_name} 未检测到明确成功/失败标识，默认认为成功")
-            return {"success": True}
+            # 缺少兑换前基线时退回提示文本判定；无法确认一律按失败处理，避免重复提交
+            notice = self._extract_notice(res.text)
+            if notice:
+                logger.warn(f"{item_name} 兑换失败: {notice}")
+                return {"success": False, "error": notice, "bonus_after": new_bonus}
+            for keyword in ["兑换成功", "交易成功", "交换成功", "成功", "success"]:
+                if keyword.lower() in res.text.lower():
+                    logger.info(f"{item_name} 兑换成功: 命中站点提示关键字 {keyword}")
+                    return {"success": True, "bonus_after": new_bonus}
+            logger.warn(f"{item_name} 无法确认兑换结果，按失败处理以避免重复提交")
+            return {"success": False, "error": "无法确认兑换结果", "bonus_after": new_bonus}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _parse_page_bonus(self, html: str) -> Optional[float]:
+        """
+        从魔力商店页面解析当前魔力值。
+
+        :param html: 页面 HTML 内容
+        :return: 解析到的魔力值，解析不到返回 None
+        """
+        if not html:
+            return None
+        bonus_patterns = [
+            r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
+            r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
+            r'当前([\d][\d,.]*\d)',
+            r'魔力值[^:：]*[：:]\s*([\d][\d,.]*\d)',
+            r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',
+            r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',
+        ]
+        for pattern in bonus_patterns:
+            bonus_match = re.search(pattern, html, re.IGNORECASE)
+            if not bonus_match:
+                continue
+            try:
+                return float(bonus_match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+        return None
+
+    def _extract_notice(self, html: str) -> Optional[str]:
+        """
+        从站点提示块里提取失败原因，避免把商店页的固定说明文字当成兑换失败。
+        """
+        if not html:
+            return None
+        blocks = re.findall(
+            r'<div[^>]*class=["\'][^"\']*(?:std|message|error|warning|tip)[^"\']*["\'][^>]*>(.*?)</div>',
+            html, re.DOTALL | re.IGNORECASE)
+        notice = " ".join(self._clean_html(block) for block in blocks)
+        notice = re.sub(r'\s+', ' ', notice).strip()
+        if not notice:
+            return None
+        if re.search(r'(失败|不足|不允许|无法|不能|已很高|权限|等级不够|用完|超过|限制|无效)', notice, re.IGNORECASE):
+            return notice[:120]
+        return None
