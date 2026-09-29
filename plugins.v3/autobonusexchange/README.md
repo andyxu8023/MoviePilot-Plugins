@@ -4,4 +4,5 @@
 ![局部展示页面](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/6.png)
 # 配置页面
 ![配置页面](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/7.png)
-# 
+# 目前已知支持站点：红豆饭，AGSVPT，高清时间，高清视界，铂金家，萝莉，PT时间，高清杜比(需要配置cookie)，憨憨，青蛙，海胆之家。不支持站点：馒头。
+# 已知支持站点中未包含的站点请自行测试
