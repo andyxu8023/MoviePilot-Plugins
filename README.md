@@ -6,3 +6,7 @@
 ![插件名：魔力值自动兑换](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/5.png)
 # 目前已知支持站点：红豆饭，AGSVPT，高清时间，高清视界，铂金家，萝莉，PT时间，高清杜比(需要配置cookie)，憨憨，青蛙，海胆之家。不支持站点：馒头。
 （已知支持站点中未包含的站点请自行测试）
+# 3.[馒头登录保活提醒](/plugins.v3/mteamkeepalive)（mteamkeepalive）
+![插件名：馒头登录保活提醒](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/8.png)
+# 通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。
+# 插件只调用官方允许第三方使用的 profile 接口查询最后浏览时间，不会自动登录。关闭“每日汇报”后，仅在剩余天数进入临期范围或检查失败时通知。
