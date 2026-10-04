@@ -8,6 +8,7 @@
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -32,7 +33,7 @@ class MTeamKeepAlive(_PluginBase):
     # 插件图标
     plugin_icon = "https://static.m-team.cc/favicon.ico"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.3"
     # 插件标签
     plugin_label = "站点"
     # 插件作者
@@ -51,7 +52,7 @@ class MTeamKeepAlive(_PluginBase):
 
     # 配置属性
     _enabled: bool = False
-    _cron: str = "0 10 * * *"
+    _cron: str = "1 0 * * *"
     _onlyonce: bool = False
     _limit_days: int = 40
     _warn_days: int = 10
@@ -59,6 +60,21 @@ class MTeamKeepAlive(_PluginBase):
 
     # 最近一次检查结果（插件侧视图，仅普通字典）
     _last_result: Dict[str, Any] = {}
+
+    # 详情页顶部大号字体样式（内联样式优先于组件默认字号与密度内边距）
+    _big_text_style = ("font-size:clamp(2rem,7vw,3rem);font-weight:700;line-height:1.25;"
+                       "text-align:center;padding:20px 12px")
+
+    # 副标题样式：另起一行并退回常规字号（否则会继承顶部大号字体）
+    _sub_text_style = "font-size:.95rem;font-weight:400;line-height:1.5;margin-top:6px"
+    # 详情页需要醒目标记的站点关键字与样式（跟随提示框文字色，浅/深色背景都清晰）
+    _keyword = "馒头"
+    _keyword_style = ("font-weight:700;text-decoration:underline;"
+                      "text-underline-offset:3px;color:inherit")
+    # 副标题文案：正常 / 临期 / 已超期
+    _subtitle_normal = "目前站点活跃度正常"
+    _subtitle_warn = "站点活跃度已临期，请尽快手动登录馒头站点保活"
+    _subtitle_over = "已超期未登录站点，账号可能已被封，请跳转至馒头站点确认"
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
@@ -68,7 +84,7 @@ class MTeamKeepAlive(_PluginBase):
         # 读取配置
         if config:
             self._enabled = bool(config.get("enabled", False))
-            self._cron = str(config.get("cron") or "0 10 * * *")
+            self._cron = str(config.get("cron") or "1 0 * * *")
             self._onlyonce = bool(config.get("onlyonce", False))
             self._limit_days = int(config.get("limit_days") or 40)
             self._warn_days = int(config.get("warn_days") or 10)
@@ -172,7 +188,7 @@ class MTeamKeepAlive(_PluginBase):
                                     "props": {
                                         "model": "cron",
                                         "label": "执行周期",
-                                        "placeholder": "5位cron表达式，默认每天10点",
+                                        "placeholder": "5位cron表达式，默认凌晨0点01分",
                                     },
                                 }],
                             },
@@ -232,7 +248,7 @@ class MTeamKeepAlive(_PluginBase):
             "enabled": False,
             "daily_report": True,
             "onlyonce": False,
-            "cron": "0 10 * * *",
+            "cron": "1 0 * * *",
             "limit_days": 40,
             "warn_days": 10,
         }
@@ -245,50 +261,103 @@ class MTeamKeepAlive(_PluginBase):
             return "—"
         return "今天" if value <= 0 else f"{value} 天前"
 
+    def _remaining_alert(self, remaining: Any) -> Tuple[str, str, str]:
+        """按剩余天数返回提示框类型、大号文案与副标题：临期黄色、超期红色。"""
+        try:
+            value = int(remaining)
+        except (TypeError, ValueError):
+            return "info", "剩余 — 天", self._subtitle_normal
+        if value < 0:
+            return "error", f"已超期 {-value} 天", self._subtitle_over
+        if value == 0:
+            return "error", "剩余 0 天", self._subtitle_over
+        if value <= self._warn_days:
+            return "warning", f"剩余 {value} 天", self._subtitle_warn
+        return "info", f"剩余 {value} 天", self._subtitle_normal
+
+    def _subtitle_node(self, text: str, link: Optional[str] = None) -> dict:
+        """生成副标题节点：常规字号另起一行，站点关键字加粗下划线，可带站点链接。"""
+        children: List[dict] = []
+        for index, part in enumerate(str(text).split(self._keyword)):
+            if index:
+                keyword: Dict[str, Any] = {
+                    "component": "a" if link else "span",
+                    "props": {"style": self._keyword_style},
+                    "text": self._keyword,
+                }
+                if link:
+                    keyword["props"].update({
+                        "href": link,
+                        "target": "_blank",
+                        "rel": "noopener noreferrer",
+                    })
+                children.append(keyword)
+            if part:
+                children.append({"component": "span", "text": part})
+        return {
+            "component": "div",
+            "props": {"style": self._sub_text_style},
+            "content": children,
+        }
+
     def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页，展示最近检查结果与历史。"""
+        """返回插件详情页：顶部大号剩余天数与副标题（临期黄、超期红），历史含最近一次记录。"""
         if not self._enabled:
             return None
         content: List[dict] = []
-        if self._last_result:
-            last = self._last_result
-            text = (f"最近一次检查：{last.get('checked_at') or '—'}，"
-                    f"最后浏览：{last.get('last_browse') or last.get('last_login') or '—'}"
-                    f"（{self._days_text(last.get('days_since'))}），"
-                    f"距 {self._limit_days} 天保活线还剩 {last.get('remaining', '—')} 天")
-            content.append({
-                "component": "VAlert",
-                "props": {"type": "info", "variant": "tonal", "text": text},
-            })
         history = self.get_data("check_history") or []
-        # 最新一条已由顶部摘要展示，列表只列更早的检查记录，避免文字重复
-        shown = history[1:] if self._last_result else history
-        for record in shown[:10]:
-            # 旧格式记录没有 last_browse 字段，退回按最后登录展示，避免标签误导
-            browse = record.get("last_browse")
-            main_line = (f"最后浏览 {browse}" if browse
-                         else f"最后登录 {record.get('last_login') or '—'}")
+        # 配置里的最近一次结果可能缺失（例如只写过历史），退回历史首条
+        last = self._last_result or (history[0] if history else {})
+        if last:
+            alert_type, big_text, subtitle = self._remaining_alert(last.get("remaining"))
+            alert: Dict[str, Any] = {
+                "component": "VAlert",
+                "props": {
+                    "type": alert_type,
+                    "variant": "tonal",
+                    "style": self._big_text_style,
+                },
+                "text": big_text,
+            }
+            if subtitle:
+                # 临期与超期文案里的「馒头」要能直接点回站点，地址取自站点管理
+                link = self._site_url() if self._keyword in subtitle else None
+                alert["content"] = [self._subtitle_node(subtitle, link)]
+            content.append(alert)
+        if history:
+            content.append({
+                "component": "VDivider",
+                "props": {"class": "my-2"},
+            })
             content.append({
                 "component": "VListItem",
-                "props": {
-                    "dense": True,
-                    "class": "text-break",
-                    "style": "white-space:pre-line",
-                },
-                "text": (f"{record.get('checked_at')} 检查：\n"
-                         f"{main_line}，{self._days_text(record.get('days_since'))}，"
-                         f"剩 {record.get('remaining', '—')} 天"),
+                "props": {"class": "text-subtitle-2 font-weight-bold"},
+                "text": f"检查历史（最近 {min(len(history), 10)} 次）",
             })
+            for index, record in enumerate(history[:10]):
+                # 旧格式记录没有 last_browse 字段，退回按最后登录展示，避免标签误导
+                browse = record.get("last_browse")
+                main_line = (f"最后浏览 {browse}" if browse
+                             else f"最后登录 {record.get('last_login') or '—'}")
+                content.append({
+                    "component": "VListItem",
+                    "props": {
+                        "dense": True,
+                        "class": "text-break",
+                        "style": "white-space:pre-line",
+                    },
+                    "text": (f"{'【最新】' if index == 0 else ''}"
+                             f"{record.get('checked_at') or '—'} 检查：\n"
+                             f"{main_line}，{self._days_text(record.get('days_since'))}，"
+                             f"剩 {record.get('remaining', '—')} 天"),
+                })
         if not content:
             content.append({
                 "component": "VAlert",
                 "props": {"type": "info", "text": "暂无检查记录，到达执行周期后自动检查。"},
             })
-        return [{
-            "component": "VCard",
-            "props": {"title": self.plugin_name},
-            "content": content,
-        }]
+        # 弹窗标题已显示插件名，页面内不再重复包一层带标题的卡片
+        return content
 
     def stop_service(self) -> None:
         """停止插件后台服务并释放资源。"""
@@ -309,6 +378,24 @@ class MTeamKeepAlive(_PluginBase):
             if "m-team" in domain:
                 return site
         return None
+
+    def _site_url(self) -> Optional[str]:
+        """从站点管理取馒头站点地址，只保留协议与域名，避免带上 URL 参数或凭据。"""
+        try:
+            site = self._get_site()
+            if not site:
+                return None
+            raw = str(site.url or "").strip()
+            parsed = urlparse(raw if "//" in raw else f"//{raw}")
+            netloc = parsed.netloc or str(site.domain or "").strip()
+            # 去掉可能存在的用户信息和 URL 参数，只留主机名
+            netloc = netloc.split("@")[-1].split("?")[0].strip("/")
+            if not netloc:
+                return None
+            return f"{parsed.scheme or 'https'}://{netloc}/"
+        except Exception as err:
+            logger.warning(f"馒头保活提醒：获取站点地址失败：{str(err)}")
+            return None
 
     def _fetch_profile(self, site) -> Optional[Dict[str, Any]]:
         """使用站点 ApiKey 调用官方允许的资料接口获取用户信息。"""
