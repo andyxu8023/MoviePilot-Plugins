@@ -27,13 +27,13 @@ class MTeamKeepAlive(_PluginBase):
     """馒头登录保活提醒插件：每日读取最后登录时间，按保活期限推送剩余天数提醒。"""
 
     # 插件名称
-    plugin_name = "馒头登录保活提醒"
+    plugin_name = "馒头登录保活提醒💻"
     # 插件描述
     plugin_desc = "通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。"
     # 插件图标
     plugin_icon = "https://static.m-team.cc/favicon.ico"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件标签
     plugin_label = "站点"
     # 插件作者
@@ -72,9 +72,9 @@ class MTeamKeepAlive(_PluginBase):
     _keyword_style = ("font-weight:700;text-decoration:underline;"
                       "text-underline-offset:3px;color:inherit")
     # 副标题文案：正常 / 临期 / 已超期
-    _subtitle_normal = "目前站点活跃度正常"
-    _subtitle_warn = "站点活跃度已临期，请尽快手动登录馒头站点保活"
-    _subtitle_over = "已超期未登录站点，账号可能已被封，请跳转至馒头站点确认"
+    _subtitle_normal = "目前站点活跃度正常。"
+    _subtitle_warn = "站点活跃度已临期，请尽快手动登录馒头站点保活。"
+    _subtitle_over = "已超期未登录站点，账号可能已被封，请跳转至馒头站点确认。"
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
@@ -481,7 +481,9 @@ class MTeamKeepAlive(_PluginBase):
             return
 
         now = datetime.now(tz=pytz.timezone(settings.TZ))
-        days_since = (now.replace(tzinfo=None) - active_at).days
+        # 站点按“连续 N 天未登录/未浏览”判定，这里用自然日差值而不是 24 小时取整；
+        # 否则昨天中午浏览、今天凌晨检查会被算成 0 天前（剩余天数少扣一天）
+        days_since = max((now.date() - active_at.date()).days, 0)
         remaining = self._limit_days - days_since
 
         self._last_result = {
