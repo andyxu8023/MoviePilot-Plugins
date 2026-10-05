@@ -72,9 +72,9 @@ class MTeamKeepAlive(_PluginBase):
     _keyword_style = ("font-weight:700;text-decoration:underline;"
                       "text-underline-offset:3px;color:inherit")
     # 副标题文案：正常 / 临期 / 已超期
-    _subtitle_normal = "目前站点活跃度正常。"
-    _subtitle_warn = "站点活跃度已临期，请尽快手动登录馒头站点保活。"
-    _subtitle_over = "已超期未登录站点，账号可能已被封，请跳转至馒头站点确认。"
+    _subtitle_normal = "目前站点活跃度正常"
+    _subtitle_warn = "站点活跃度已临期，请尽快手动登录馒头站点保活"
+    _subtitle_over = "已超期未登录站点，账号可能已被封，请跳转至馒头站点确认"
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
