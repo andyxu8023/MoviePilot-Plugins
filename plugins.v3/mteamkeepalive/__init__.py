@@ -27,7 +27,7 @@ class MTeamKeepAlive(_PluginBase):
     """馒头登录保活提醒插件：每日读取最后登录时间，按保活期限推送剩余天数提醒。"""
 
     # 插件名称
-    plugin_name = "馒头登录保活提醒💻"
+    plugin_name = "馒头登录保活提醒"
     # 插件描述
     plugin_desc = "通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。"
     # 插件图标
