@@ -36,7 +36,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.0.5"
+    plugin_version = "2.0.6"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -401,7 +401,7 @@ class AutoBonusExchange(_PluginBase):
 
         def _fmt_bonus(value) -> str:
             """未取到魔力值时显示占位符，避免看起来像被清零。"""
-            return f"{value}" if value else "—"
+            return self._fmt_num(value) if value else "—"
 
         for site_name, result in today_data.get("results", {}).items():
             status = result.get("status", "unknown")
@@ -412,19 +412,11 @@ class AutoBonusExchange(_PluginBase):
 
             texts = [f"魔力值: {_fmt_bonus(result.get('bonus_before', 0))} → "
                      f"{_fmt_bonus(result.get('bonus_after', 0))}"]
-            grouped: Dict[str, dict] = {}
-            for ex in exchanged:
-                key = f"{ex.get('item', '')}|{ex.get('cost', 0)}"
-                row = grouped.setdefault(key, {
-                    "item": ex.get("item", ""),
-                    "cost": ex.get("cost", 0) or 0,
-                    "count": 0,
-                })
-                row["count"] += 1
-            for row in grouped.values():
+            for row in self._group_exchanged(exchanged):
                 # 同档位多笔合并成一行，移动端不至于被重复条目刷屏
-                texts.append(f"已兑换: {row['item']} × {row['count']}，单价 {row['cost']}，"
-                             f"共消耗 {round(row['cost'] * row['count'], 2)}")
+                texts.append(f"已兑换: {row['name']} × {row['count']}，"
+                             f"单价 {self._fmt_num(row['cost'])}，"
+                             f"共消耗 {self._fmt_num(row['cost'] * row['count'])}")
             for attempt in attempts:
                 if attempt.get("success"):
                     continue
@@ -1110,32 +1102,166 @@ class AutoBonusExchange(_PluginBase):
         current = self._circuit_breaker.get(site_name, 0)
         self._circuit_breaker[site_name] = current + 1
 
-    def _send_notification(self, today_data: dict) -> None:
-        """发送兑换结果通知。"""
-        results = today_data.get("results", {})
-        success_count = sum(1 for r in results.values() if r.get("status") == "success")
-        failed_count = sum(1 for r in results.values() if r.get("status") == "failed")
-        skipped_count = sum(1 for r in results.values() if r.get("status") == "skipped")
+    # 把冗长的跳过原因压成短标签，同类站点合并成一行（按顺序优先匹配）
+    _SKIP_LABELS = (
+        ("站点已禁用全部档位", ("全部被站点禁用",)),
+        ("未达保留值", ("未超过保留值",)),
+        ("商店未解析到兑换项", ("没有解析到兑换项",)),
+        ("没有匹配的档位类型", ("商店里没有「",)),
+        ("可用魔力值不足", ("可用魔力值不足",)),
+        ("余额低于最低档位", ("最低档位消耗",)),
+        ("本轮连续失败已熔断", ("熔断",)),
+    )
+    # 单节内最多列出的站点数，超出折叠成「等 N 个站点」
+    _MAX_LIST_SITES = 8
+    # 通知整体长度上限，防止极端配置把消息渠道刷屏
+    _MAX_NOTIFY_LEN = 1200
+    # 档位名形如 "10.0 GB上传量"，用于汇总一共兑换到多少流量
+    _TRAFFIC_RE = re.compile(r"([\d.]+)\s*(KB|MB|GB|TB)\s*(上传量|下载量)")
 
-        lines = [f"成功: {success_count}, 失败: {failed_count}, 跳过: {skipped_count}"]
+    @staticmethod
+    def _fmt_num(value: Any) -> str:
+        """统一格式化魔力值：整数不留小数位，小数最多两位并去尾零，附加千分位。"""
+        try:
+            num = float(value or 0)
+        except (TypeError, ValueError):
+            return str(value)
+        if num == int(num):
+            return f"{int(num):,}"
+        return f"{num:,.2f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _one_line(value: Any, limit: int = 120) -> str:
+        """只取原因首行并压缩空白，多行说明留给插件页面展示。"""
+        line = re.sub(r"\s+", " ", str(value or "").split("\n", 1)[0]).strip()
+        return f"{line[:limit]}…" if len(line) > limit else line
+
+    @classmethod
+    def _skip_label(cls, error: Any) -> str:
+        """把跳过原因归类成短标签，无法归类时保留首行短句。"""
+        raw = str(error or "")
+        for label, keywords in cls._SKIP_LABELS:
+            if any(keyword in raw for keyword in keywords):
+                return label
+        return cls._one_line(raw or "本轮无兑换动作", 40)
+
+    @staticmethod
+    def _group_exchanged(exchanged: List[dict]) -> List[dict]:
+        """按档位与单价聚合兑换明细，同档位多笔合并，消耗大的排前面。"""
+        grouped: Dict[str, dict] = {}
+        for item in exchanged or []:
+            name = str(item.get("gain") or item.get("item") or "未命名档位")
+            try:
+                cost = float(item.get("cost") or 0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            row = grouped.setdefault(f"{name}|{cost}", {"name": name, "cost": cost, "count": 0})
+            row["count"] += 1
+        return sorted(grouped.values(),
+                      key=lambda row: row["cost"] * row["count"],
+                      reverse=True)
+
+    @classmethod
+    def _sum_traffic(cls, exchanged: List[dict]) -> str:
+        """累加档位名里的流量；有一笔解析不出就不给总量，避免单位混杂造成误导。"""
+        totals: Dict[Tuple[str, str], float] = {}
+        for item in exchanged or []:
+            name = str(item.get("gain") or item.get("item") or "")
+            matched = cls._TRAFFIC_RE.search(name)
+            if not matched:
+                return ""
+            amount, unit, kind = matched.groups()
+            try:
+                value = float(amount)
+            except ValueError:
+                return ""
+            totals[(unit, kind)] = totals.get((unit, kind), 0) + value
+        parts = []
+        for key in sorted(totals, key=lambda item: item[1] != "上传量"):
+            parts.append(f"{cls._fmt_num(totals[key])} {key[0]}{key[1]}")
+        return "、".join(parts)
+
+    def _send_notification(self, today_data: dict) -> None:
+        """发送兑换结果通知：汇总行在前，已兑换逐站一行，跳过站点按原因合并。"""
+        results = today_data.get("results", {})
+        exchanged_lines: List[str] = []
+        failed_lines: List[str] = []
+        skip_groups: Dict[str, List[str]] = {}
+        skip_order: List[str] = []
+        total_count = 0
+        total_cost = 0.0
+        all_exchanged: List[dict] = []
+
         for site_name, site_result in results.items():
             status = site_result.get("status")
             exchanged = site_result.get("exchanged") or []
+
             if status == "success":
-                total_cost = sum(e.get("cost") or 0 for e in exchanged)
-                gains = "、".join([e.get("gain") or e.get("item") or "" for e in exchanged])
-                text = f"兑换 {len(exchanged)} 笔，消耗 {total_cost}，获得 {gains}"
-                note = str(site_result.get("note") or "").replace("\n", "；")
+                rows = self._group_exchanged(exchanged)
+                site_cost = sum(row["cost"] * row["count"] for row in rows)
+                total_count += len(exchanged)
+                total_cost += site_cost
+                all_exchanged.extend(exchanged)
+                details = "、".join(
+                    f"{row['name']} ×{row['count']}" if row["count"] > 1 else row["name"]
+                    for row in rows
+                )
+                line = (f"{site_name}：{details}，消耗 {self._fmt_num(site_cost)}，"
+                        f"魔力值 {self._fmt_num(site_result.get('bonus_before'))} → "
+                        f"{self._fmt_num(site_result.get('bonus_after'))}")
+                note = self._one_line(site_result.get("note"), 80)
                 if note:
-                    text += f"；{note}"
-                lines.append(f"{site_name}: {text}")
+                    line += f"；{note}"
+                exchanged_lines.append(line)
             elif status == "failed":
-                reason = str(site_result.get("error") or "未知原因").replace("\n", "；")
-                lines.append(f"{site_name}: 失败 - {reason}")
+                reason = self._one_line(site_result.get("error") or "未知原因", 100)
+                failed_lines.append(f"{site_name}：{reason}")
             else:
-                reason = str(site_result.get("error") or "无兑换动作").replace("\n", "；")
-                lines.append(f"{site_name}: 跳过 - {reason}")
-        message = "\n".join(lines)
+                label = self._skip_label(site_result.get("error"))
+                if label not in skip_groups:
+                    skip_groups[label] = []
+                    skip_order.append(label)
+                # 未达保留值的站点带上余额，其余只列站名，保证一行读完
+                if label == "未达保留值":
+                    skip_groups[label].append(
+                        f"{site_name} {self._fmt_num(site_result.get('bonus_before'))}"
+                    )
+                else:
+                    skip_groups[label].append(site_name)
+
+        handled = f"处理 {len(results)} 个站点"
+        if total_count:
+            summary = f"兑换 {total_count} 笔，消耗 {self._fmt_num(total_cost)} 魔力值"
+            traffic = self._sum_traffic(all_exchanged)
+            if traffic:
+                summary += f"，获得 {traffic}"
+            failed_count = sum(1 for r in results.values() if r.get("status") == "failed")
+            summary += f"（{handled}"
+            if failed_count:
+                summary += f"，失败 {failed_count} 个站点"
+            summary += "）"
+        else:
+            summary = f"本轮没有兑换动作（{handled}）"
+
+        sections: List[List[str]] = [[summary]]
+        if exchanged_lines:
+            sections.append(["【已兑换】"] + exchanged_lines)
+        if failed_lines:
+            sections.append(["【失败】"] + failed_lines)
+        if skip_order:
+            section = ["【未兑换】"]
+            for label in skip_order:
+                names = skip_groups[label]
+                shown = "、".join(names[:self._MAX_LIST_SITES])
+                if len(names) > self._MAX_LIST_SITES:
+                    shown += f" 等 {len(names)} 个站点"
+                section.append(f"{label}：{shown}")
+            sections.append(section)
+
+        message = "\n\n".join("\n".join(section) for section in sections)
+        if len(message) > self._MAX_NOTIFY_LEN:
+            message = (f"{message[:self._MAX_NOTIFY_LEN].rstrip()}"
+                       f"\n…（内容过长已截断，详见插件页面记录）")
 
         self.post_message(
             mtype=NotificationType.SiteMessage,
