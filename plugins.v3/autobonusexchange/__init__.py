@@ -30,13 +30,13 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换"
+    plugin_name = "魔力值自动兑换💻"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.0.6"
+    plugin_version = "2.1.1"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -378,85 +378,324 @@ class AutoBonusExchange(_PluginBase):
             "force_run": False,
         }
 
+    # 详情页往前追溯兑换记录的天数
+    _LOOKBACK_DAYS = 30
+    # 日期按钮条最多展示的日期数，当前查看的日期始终保证可见
+    _MAX_DATE_BUTTONS = 14
+
     def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页面。"""
+        """返回插件详情页面：用日期按钮切换查看对应的兑换记录。"""
         if not self._enabled:
             return None
 
-        # 获取今日数据
         today = datetime.today().strftime('%Y-%m-%d')
-        today_data = self.get_data(key=f"bonus_{today}")
+        days = self._list_record_days(today)
+        if not days:
+            return [self._build_alert(f"近 {self._LOOKBACK_DAYS} 天内暂无兑换记录")]
 
-        if not today_data:
-            return [{
-                "component": "VAlert",
+        selected = self._selected_view_day(today, days)
+        records = self.get_data(key=f"bonus_{selected}") or {}
+
+        blocks = []
+        # 查看的是历史日期时，把今日状态说明放在最上面，先看状态再选日期
+        if selected != today:
+            blocks.append(self._build_alert("今日暂无兑换记录，当前展示所选日期的记录"))
+        blocks.append(self._build_date_bar(self._visible_days(days, selected), selected, today))
+        title = ("今日兑换记录" if selected == today
+                 else f"兑换记录（{self._run_label(selected, records)}）")
+        blocks.append(self._build_records_card(title, records))
+        return blocks
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        """注册插件自定义接口，供详情页日期按钮回写查看日期。"""
+        return [
+            {
+                "path": "/set_view_date",
+                "endpoint": self.set_view_date,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "切换魔力值自动兑换详情页查看的记录日期",
+            }
+        ]
+
+    def set_view_date(self, date: str = "") -> dict:
+        """
+        保存详情页要展示的兑换日期，前端调用成功后会自动重新拉取页面。
+
+        返回值必须严格是 success/message/data 三个键：宿主前端把不满足这一信封结构的
+        响应判为 invalid-envelope，会提示「服务器返回了无效响应」并且不再刷新详情页。
+        """
+        day = self._normalize_date(date)
+        if not day:
+            return {"success": False, "message": "日期格式不正确，应为 YYYY-MM-DD", "data": None}
+        records = self.get_data(key=f"bonus_{day}")
+        if not records or not records.get("results"):
+            return {"success": False, "message": f"{day} 没有兑换记录", "data": None}
+        # 记下回写时间，隔天自动失效，避免页面一直停在很久以前选的日期
+        self.save_data(key="view_date", value={
+            "date": day,
+            "set_at": datetime.today().strftime('%Y-%m-%d'),
+        })
+        logger.info(f"魔力值兑换详情页切换查看日期：{day}")
+        return {"success": True, "message": f"已切换到 {day}", "data": {"date": day}}
+
+    @staticmethod
+    def _build_alert(text: str) -> dict:
+        """页面顶部的一条提示信息。"""
+        return {
+            "component": "VAlert",
+            "props": {"type": "info", "variant": "tonal", "class": "mb-3", "text": text},
+        }
+
+    @staticmethod
+    def _normalize_date(value: Any) -> Optional[str]:
+        """把外部传入的日期规范化成 YYYY-MM-DD，非法值返回 None。"""
+        text = str(value or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return None
+        try:
+            datetime.strptime(text, '%Y-%m-%d')
+        except ValueError:
+            return None
+        return text
+
+    def _list_record_days(self, today: str) -> List[str]:
+        """逐日扫描最近记录，返回有站点处理结果的日期（新→旧）。"""
+        base = datetime.strptime(today, '%Y-%m-%d')
+        days = []
+        for offset in range(0, self._LOOKBACK_DAYS + 1):
+            day = (base - timedelta(days=offset)).strftime('%Y-%m-%d')
+            records = self.get_data(key=f"bonus_{day}")
+            if records and records.get("results"):
+                days.append(day)
+        return days
+
+    def _requested_view_day(self, today: str) -> Optional[str]:
+        """读取日期按钮回写的查看日期；隔天自动失效，避免一直停在历史日期。"""
+        saved = self.get_data(key="view_date")
+        if isinstance(saved, dict):
+            if str(saved.get("set_at") or "") != today:
+                return None
+            return self._normalize_date(saved.get("date"))
+        # 兼容早期直接存日期字符串的记录
+        return self._normalize_date(saved)
+
+    def _selected_view_day(self, today: str, days: List[str]) -> str:
+        """优先用查看日期，无效时回到今天或最近一次记录。"""
+        view_date = self._requested_view_day(today)
+        if view_date and view_date in days:
+            return view_date
+        if today in days:
+            return today
+        return days[0]
+
+    def _visible_days(self, days: List[str], selected: str) -> List[str]:
+        """日期按钮限量展示，但当前查看的日期保证可见。"""
+        visible = days[:self._MAX_DATE_BUTTONS]
+        if selected in visible:
+            return visible
+        return [selected] + visible[:max(self._MAX_DATE_BUTTONS - 1, 0)]
+
+    def _build_date_bar(self, days: List[str], selected: str, today: str) -> dict:
+        """渲染日期切换条：每天一个可点片，点击后回写查看日期并自动刷新页面。"""
+        api = f"plugin/{self.__class__.__name__}/set_view_date"
+        chips = []
+        for day in days:
+            is_current = day == selected
+            chips.append({
+                "component": "VChip",
                 "props": {
-                    "type": "info",
-                    "text": "今日暂无兑换记录"
-                }
+                    "size": "small",
+                    "clickable": True,
+                    "ripple": False,
+                    "class": "text-none",
+                    "variant": "flat" if is_current else "tonal",
+                    "color": "primary" if is_current else "grey-lighten-3",
+                },
+                "text": "今日" if day == today else day,
+                "events": {
+                    "click": {
+                        "api": api,
+                        "method": "get",
+                        "params": {"date": day},
+                    }
+                },
+            })
+        return {
+            "component": "VCard",
+            "props": {"variant": "outlined", "flat": True, "class": "mb-3 pa-3"},
+            "content": [{
+                "component": "div",
+                "props": {"style": self._FLEX_ROW_STYLE},
+                "content": [{
+                    "component": "span",
+                    "props": {"class": "text-caption text-medium-emphasis mr-1"},
+                    "text": "查看日期",
+                }] + chips
             }]
+        }
 
-        # 构建详情列表
-        items = []
+    @staticmethod
+    def _run_label(day: str, records: dict) -> str:
+        """给历史卡片标题带上当时的执行时间，形如 2026-10-05 09:00。"""
+        started = str(records.get("start_time") or "")
+        # start_time 形如 2026-10-05T09:00:00.017683，只保留到分钟
+        if len(started) >= 16 and started[:10] == day:
+            return f"{day} {started[11:16]}"
+        return day
 
-        def _fmt_bonus(value) -> str:
-            """未取到魔力值时显示占位符，避免看起来像被清零。"""
-            return self._fmt_num(value) if value else "—"
+    # 状态徽章文案、配色与展示顺序：有动作的排前面，异常次之，被跳过的最后
+    _STATUS_TEXT = {"success": "成功", "failed": "失败", "skipped": "跳过", "unknown": "未知"}
+    _STATUS_COLOR = {"success": "success", "failed": "error",
+                     "skipped": "warning", "unknown": "grey"}
+    _STATUS_ORDER = {"success": 0, "failed": 1, "skipped": 2, "unknown": 3}
+    # 弹性行容器：按内容宽度排列并自动换行，避开 VRow/VCol 在窄屏下撑出大间距
+    _FLEX_ROW_STYLE = "display:flex;flex-wrap:wrap;gap:6px;align-items:center"
+    # VListItemTitle 默认单行截断，改成弹性行让站点名与徽章同行且长名可换行
+    _TITLE_STYLE = ("display:flex;align-items:center;gap:6px;flex-wrap:wrap;"
+                    "overflow:visible;text-overflow:clip;-webkit-line-clamp:unset")
 
-        for site_name, result in today_data.get("results", {}).items():
-            status = result.get("status", "unknown")
+    def _aggregate(self, results: dict) -> dict:
+        """汇总一轮兑换，页面副标题与通知首行共用同一口径。"""
+        total_count = 0
+        total_cost = 0.0
+        all_exchanged: List[dict] = []
+        counts = {"success": 0, "failed": 0, "skipped": 0, "unknown": 0}
+        for result in (results or {}).values():
+            status = str(result.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
             exchanged = result.get("exchanged") or []
-            attempts = result.get("attempts") or []
-            status_text = {"success": "成功", "failed": "失败", "skipped": "跳过"}.get(status, "未知")
-            status_color = "success" if status == "success" else "error" if status == "failed" else "warning"
+            if status != "success" or not exchanged:
+                continue
+            rows = self._group_exchanged(exchanged)
+            total_count += len(exchanged)
+            total_cost += sum(row["cost"] * row["count"] for row in rows)
+            all_exchanged.extend(exchanged)
+        return {
+            "count": total_count,
+            "cost": total_cost,
+            "traffic": self._sum_traffic(all_exchanged),
+            "sites": len(results or {}),
+            "success": counts["success"],
+            "failed": counts["failed"],
+            "skipped": counts["skipped"],
+        }
 
-            texts = [f"魔力值: {_fmt_bonus(result.get('bonus_before', 0))} → "
-                     f"{_fmt_bonus(result.get('bonus_after', 0))}"]
-            for row in self._group_exchanged(exchanged):
-                # 同档位多笔合并成一行，移动端不至于被重复条目刷屏
-                texts.append(f"已兑换: {row['name']} × {row['count']}，"
-                             f"单价 {self._fmt_num(row['cost'])}，"
-                             f"共消耗 {self._fmt_num(row['cost'] * row['count'])}")
-            for attempt in attempts:
-                if attempt.get("success"):
-                    continue
-                texts.append(f"未落地: {attempt.get('item', '')} - "
-                             f"{attempt.get('detail') or '兑换未生效'}")
-            if result.get("error"):
-                texts.append(f"原因: {result.get('error')}")
-            if result.get("note") and not any(not a.get("success") for a in attempts):
-                texts.append(f"说明: {result.get('note')}")
+    def _build_summary_subtitle(self, summary: dict) -> str:
+        """卡片副标题一行看完本轮成果与站点处理情况。"""
+        parts = []
+        if summary["count"]:
+            parts.append(f"兑换 {summary['count']} 笔")
+            parts.append(f"消耗 {self._fmt_num(summary['cost'])} 魔力值")
+            if summary["traffic"]:
+                parts.append(f"获得 {summary['traffic']}")
+        else:
+            parts.append("本轮没有兑换动作")
+        parts.append(f"成功 {summary['success']} · 失败 {summary['failed']} · "
+                     f"跳过 {summary['skipped']} · 共 {summary['sites']} 个站点")
+        return " · ".join(parts)
+
+    def _build_records_card(self, title: str, records: dict) -> dict:
+        """把一轮兑换记录渲染成卡片：副标题是汇总，站点按状态排序，明细统一行式。"""
+        results = records.get("results") or {}
+        summary = self._aggregate(results)
+
+        def _sort_key(pair) -> Tuple[int, float]:
+            """成功、失败、跳过依次排列，同状态内按消耗从大到小。"""
+            _, result = pair
+            status = str(result.get("status") or "unknown")
+            cost = sum(row["cost"] * row["count"]
+                       for row in self._group_exchanged(result.get("exchanged") or []))
+            return self._STATUS_ORDER.get(status, 3), -cost
+
+        items = []
+        for site_name, result in sorted(results.items(), key=_sort_key):
+            status = str(result.get("status") or "unknown")
+            exchanged = result.get("exchanged") or []
+            rows = self._group_exchanged(exchanged)
+            site_cost = sum(row["cost"] * row["count"] for row in rows)
+
+            def _bonus(value) -> str:
+                """未取到魔力值时显示占位符，避免看起来像被清零。"""
+                return self._fmt_num(value) if value else "—"
+
+            before, after = _bonus(result.get("bonus_before")), _bonus(result.get("bonus_after"))
+            if before == after:
+                head = f"魔力值 {before}（未变动）" if before != "—" else "未取到魔力值"
+            else:
+                head = (f"魔力值 {before} → {after}"
+                        f"（-{self._fmt_num(site_cost)}）")
+
+            lines = [head]
+            for row in rows:
+                # 同档位多笔合并成一行，移动端不被重复条目刷屏；单笔不带 ×1
+                label = row["name"] if row["count"] == 1 else f"{row['name']} ×{row['count']}"
+                lines.append(f"{label} · 单价 {self._fmt_num(row['cost'])}")
+
+            note = self._one_line(result.get("note"), 90)
+            error = self._one_line(result.get("error"), 90)
+            if error:
+                lines.append(f"{'失败' if status == 'failed' else '原因'}：{error}")
+            if note:
+                lines.append(f"说明：{note}")
+            elif status == "success":
+                missed = [a for a in (result.get("attempts") or []) if not a.get("success")]
+                if missed:
+                    detail = self._one_line(missed[0].get("detail"), 90)
+                    lines.append(f"未落地：{detail or missed[0].get('item') or '兑换未生效'}")
 
             content = [{
+                # 站点名与状态徽章同行，徽章跟在名字后面
                 "component": "VListItemTitle",
-                "content": [{
-                    "component": "VChip",
-                    "props": {"color": status_color, "size": "small"},
-                    "text": status_text
-                }]
+                "props": {"class": "text-break", "style": self._TITLE_STYLE},
+                "content": [
+                    {"component": "span", "text": site_name},
+                    {
+                        "component": "VChip",
+                        "props": {
+                            "color": self._STATUS_COLOR.get(status, "grey"),
+                            "size": "x-small",
+                            "variant": "flat",
+                        },
+                        "text": self._STATUS_TEXT.get(status, "未知"),
+                    },
+                ]
             }]
-            # 每条信息一行，长句由浏览器按容器宽度自动换行（桌面端不再被固定列宽截断）
-            for text in texts:
+            for index, text in enumerate(lines):
+                # 首行保持正常字号，档位与备注等明细降为灰色小字
+                css = "text-break" if index == 0 else "text-break text-caption text-medium-emphasis"
                 content.append({
                     "component": "VListItemSubtitle",
-                    "props": {"class": "text-break", "style": self._WRAP_STYLE},
-                    "text": text
+                    "props": {"class": css, "style": self._WRAP_STYLE},
+                    "text": text,
                 })
 
             items.append({
                 "component": "VListItem",
-                "props": {"title": site_name},
-                "content": content
+                "props": {"class": "py-2"},
+                "content": content,
             })
 
-        return [{
+        return {
             "component": "VCard",
-            "props": {"title": "今日兑换记录"},
-            "content": [{
-                "component": "VList",
-                "content": items
-            }]
-        }]
+            "props": {"title": title, "class": "mb-3"},
+            "content": [
+                {
+                    # VCard 的 subtitle 会单行截断，汇总行改由内容区首行承载以便自动换行
+                    "component": "div",
+                    "props": {
+                        "class": "text-caption text-medium-emphasis px-4 pt-1 pb-2",
+                        "style": self._WRAP_STYLE,
+                    },
+                    "text": self._build_summary_subtitle(summary),
+                },
+                {
+                    "component": "VList",
+                    "props": {"density": "compact"},
+                    "content": items,
+                },
+            ]
+        }
 
     def stop_service(self) -> None:
         """停止插件后台服务并释放资源。"""
@@ -1188,9 +1427,6 @@ class AutoBonusExchange(_PluginBase):
         failed_lines: List[str] = []
         skip_groups: Dict[str, List[str]] = {}
         skip_order: List[str] = []
-        total_count = 0
-        total_cost = 0.0
-        all_exchanged: List[dict] = []
 
         for site_name, site_result in results.items():
             status = site_result.get("status")
@@ -1199,9 +1435,6 @@ class AutoBonusExchange(_PluginBase):
             if status == "success":
                 rows = self._group_exchanged(exchanged)
                 site_cost = sum(row["cost"] * row["count"] for row in rows)
-                total_count += len(exchanged)
-                total_cost += site_cost
-                all_exchanged.extend(exchanged)
                 details = "、".join(
                     f"{row['name']} ×{row['count']}" if row["count"] > 1 else row["name"]
                     for row in rows
@@ -1230,15 +1463,15 @@ class AutoBonusExchange(_PluginBase):
                     skip_groups[label].append(site_name)
 
         handled = f"处理 {len(results)} 个站点"
-        if total_count:
-            summary = f"兑换 {total_count} 笔，消耗 {self._fmt_num(total_cost)} 魔力值"
-            traffic = self._sum_traffic(all_exchanged)
-            if traffic:
-                summary += f"，获得 {traffic}"
-            failed_count = sum(1 for r in results.values() if r.get("status") == "failed")
+        stat = self._aggregate(results)
+        if stat["count"]:
+            summary = (f"兑换 {stat['count']} 笔，"
+                       f"消耗 {self._fmt_num(stat['cost'])} 魔力值")
+            if stat["traffic"]:
+                summary += f"，获得 {stat['traffic']}"
             summary += f"（{handled}"
-            if failed_count:
-                summary += f"，失败 {failed_count} 个站点"
+            if stat["failed"]:
+                summary += f"，失败 {stat['failed']} 个站点"
             summary += "）"
         else:
             summary = f"本轮没有兑换动作（{handled}）"
