@@ -53,7 +53,7 @@
   },
   "MTeamKeepAlive": {
     "name": "馒头登录保活提醒",
-    "description": "通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。",
+    "description": "馒头站点不支持自动模拟登录，此插件通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。",
     "labels": "站点",
     "version": "1.0.4",
     "icon": "https://static.m-team.cc/favicon.ico",
