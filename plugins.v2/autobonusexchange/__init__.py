@@ -5,6 +5,7 @@ NexusPHP 魔力值自动兑换插件
 支持自适应限速、多站并发、单站串行、安全熔断与任务统计。
 """
 
+import os
 import re
 import time
 import traceback
@@ -25,6 +26,9 @@ from app.utils.string import StringUtils
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# 演练模式哨兵文件：存在时只解析商店并输出兑换计划，不提交任何兑换
+_DRY_RUN_FLAG = "/config/temp/autobonusexchange_dry_run"
+
 
 class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
@@ -36,7 +40,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.1.1"
+    plugin_version = "2.1.2"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -64,16 +68,27 @@ class AutoBonusExchange(_PluginBase):
     _max_retry: int = 3
     _circuit_break_threshold: int = 5
     _rate_limit_ms: int = 1000
+    # 「上传+下载」保活模式：单站单轮最多兑换次数
+    _max_steps: int = 10
+    # 上传档被禁用后，连续换几笔下载仍未解锁就停止
+    _max_download_to_unlock: int = 2
 
     # 运行时状态
     _today_data: dict = {}
     _circuit_breaker: dict = {}
     _force_run: bool = False
+    # 演练模式：存在 _DRY_RUN_FLAG 文件时只输出计划、不提交兑换
+    _dry_run: bool = False
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
         # 停止现有任务
         self.stop_service()
+
+        # 演练模式：哨兵文件存在时只出计划，用于上线前验证档位与方向
+        self._dry_run = os.path.exists(_DRY_RUN_FLAG)
+        if self._dry_run:
+            logger.warn(f"检测到演练标记 {_DRY_RUN_FLAG}，本轮只输出兑换计划，不会提交任何兑换")
 
         # 配置
         if config:
@@ -90,6 +105,8 @@ class AutoBonusExchange(_PluginBase):
             self._circuit_break_threshold = int(config.get("circuit_break_threshold", 5))
             self._rate_limit_ms = int(config.get("rate_limit_ms", 1000))
             self._force_run = config.get("force_run", False)
+            self._max_steps = int(config.get("max_steps", 10) or 10)
+            self._max_download_to_unlock = int(config.get("max_download_to_unlock", 2) or 2)
 
             # 过滤掉已删除的站点
             all_sites = [site.id for site in SiteOper().list_order_by_pri()]
@@ -137,6 +154,8 @@ class AutoBonusExchange(_PluginBase):
             "max_retry": self._max_retry,
             "circuit_break_threshold": self._circuit_break_threshold,
             "rate_limit_ms": self._rate_limit_ms,
+            "max_steps": self._max_steps,
+            "max_download_to_unlock": self._max_download_to_unlock,
             "force_run": self._force_run,
         })
 
@@ -315,6 +334,41 @@ class AutoBonusExchange(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "max_steps",
+                                        "label": "单站单轮最多兑换次数",
+                                        "type": "number",
+                                        "placeholder": "10",
+                                        "hint": "「上传+下载」按分享率保活逐笔兑换时生效，配合请求间隔控制单轮耗时",
+                                        "persistent_hint": True
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "max_download_to_unlock",
+                                        "label": "解锁上传最多换下载(次)",
+                                        "type": "number",
+                                        "placeholder": "2",
+                                        "hint": "上传档被站点禁用后，连续兑换下载量仍不允许兑换上传时停止，避免继续压低分享率",
+                                        "persistent_hint": True
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [{
                                     "component": "VSelect",
@@ -375,6 +429,8 @@ class AutoBonusExchange(_PluginBase):
             "max_retry": 3,
             "circuit_break_threshold": 5,
             "rate_limit_ms": 1000,
+            "max_steps": 10,
+            "max_download_to_unlock": 2,
             "force_run": False,
         }
 
@@ -627,6 +683,9 @@ class AutoBonusExchange(_PluginBase):
                         f"（-{self._fmt_num(site_cost)}）")
 
             lines = [head]
+            ratio_predict = self._one_line(result.get("ratio_predict"), 60)
+            if ratio_predict:
+                lines.append(f"预测分享率 {ratio_predict}")
             for row in rows:
                 # 同档位多笔合并成一行，移动端不被重复条目刷屏；单笔不带 ×1
                 label = row["name"] if row["count"] == 1 else f"{row['name']} ×{row['count']}"
@@ -643,6 +702,11 @@ class AutoBonusExchange(_PluginBase):
                 if missed:
                     detail = self._one_line(missed[0].get("detail"), 90)
                     lines.append(f"未落地：{detail or missed[0].get('item') or '兑换未生效'}")
+            if result.get("dry_run"):
+                # 演练模式的逐笔推演跟在原因行后面，第一行已作为原因显示，这里只补步骤行
+                for extra in str(result.get("error") or "").split("\n")[1:]:
+                    if extra.strip():
+                        lines.append(extra.strip())
 
             content = [{
                 # 站点名与状态徽章同行，徽章跟在名字后面
@@ -765,6 +829,325 @@ class AutoBonusExchange(_PluginBase):
             self._send_notification(today_data)
 
         logger.info(f"魔力兑换任务完成，共处理 {len(results)} 个站点")
+
+    def _fetch_bonus_info(self, req_utils: RequestUtils, site_name: str, site_url: str,
+                          bonus_url: str, adapter: "NexusPHPBonusAdapter",
+                          save_debug: bool = True) -> Tuple[Optional[dict], Any]:
+        """
+        获取并解析魔力商店页面，供逐笔兑换之间刷新档位可用状态使用。
+
+        :param req_utils: 请求工具
+        :param site_name: 站点名称
+        :param site_url: 站点地址
+        :param bonus_url: 魔力商店地址
+        :param adapter: 魔力商店适配器
+        :param save_debug: 是否保存页面到调试目录（仅首次获取时保存，保留兑换前的原始页面）
+        :return: (商店解析结果, 响应对象)，取不到时第一项为 None
+        """
+        try:
+            res = req_utils.get_res(url=bonus_url)
+        except Exception as e:
+            logger.error(f"{site_name} 获取魔力商店异常: {str(e)}")
+            return None, None
+
+        if not res or res.status_code != 200:
+            if res is None:
+                logger.warn(f"{site_name} 获取魔力商店失败：请求无响应（网络不通、超时或被站点拒绝，Cookie 可能已失效）")
+            else:
+                logger.warn(f"{site_name} 获取魔力商店失败：状态码 {res.status_code}（多为 Cookie 失效或被站点拦截）")
+            return None, res
+
+        html = res.text or ""
+
+        # 调试：保存 HTML 到文件
+        if save_debug:
+            try:
+                debug_dir = "/config/temp/bonus_debug"
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_file = f"{debug_dir}/{site_name.replace(' ', '_')}_mybonus.html"
+                with open(debug_file, "w", encoding="utf-8") as f:
+                    f.write(html)
+                logger.info(f"{site_name} HTML 已保存到: {debug_file}")
+            except Exception as e:
+                logger.debug(f"保存调试文件失败: {e}")
+
+        if '/api/bonus-shop/getItems' in html:
+            bonus_info = self._parse_api_bonus_page(req_utils, site_url, html)
+        else:
+            bonus_info = adapter.parse_bonus_page(html)
+            if bonus_info and not bonus_info.get("available_items"):
+                logger.debug(f"{site_name} 魔力商店 HTML 前 2000 字符:\n{html[:2000]}")
+                form_match = re.search(r'<form[^>]*>.*?</form>', html, re.DOTALL | re.IGNORECASE)
+                if form_match:
+                    logger.debug(f"{site_name} 找到 form:\n{form_match.group(0)[:1500]}")
+                table_match = re.search(r'<table[^>]*>.*?</table>', html, re.DOTALL | re.IGNORECASE)
+                if table_match:
+                    logger.debug(f"{site_name} 找到 table:\n{table_match.group(0)[:1500]}")
+
+        return bonus_info, res
+
+    # 档位名里的体积解析，支持 KB/MB/GB/TB 与 KiB/MiB/GiB/TiB 写法
+    _TIER_SIZE_RE = re.compile(r"([\d.]+)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)", re.IGNORECASE)
+    _SIZE_TO_GB = {"KB": 1 / 1024 ** 2, "KIB": 1 / 1024 ** 2,
+                   "MB": 1 / 1024, "MIB": 1 / 1024,
+                   "GB": 1.0, "GIB": 1.0,
+                   "TB": 1024.0, "TIB": 1024.0}
+    # 档位类别标签
+    _KIND_LABELS = {"upload": "上传量", "download": "下载量"}
+
+    def _item_kind(self, item: dict) -> str:
+        """判断档位类别：upload / download / other。"""
+        b_type = str(item.get("b_type") or "").lower()
+        if b_type == "uploaded":
+            return "upload"
+        if b_type == "downloaded":
+            return "download"
+        name = str(item.get("name") or "").lower()
+        if "上传" in name or "upload" in name:
+            return "upload"
+        if "下载" in name or "download" in name:
+            return "download"
+        return "other"
+
+    def _split_by_kind(self, items: List[dict]) -> Dict[str, List[dict]]:
+        """把档位按上传量/下载量分组，只保留站点当前允许兑换的档位。"""
+        pools: Dict[str, List[dict]] = {"upload": [], "download": []}
+        for item in items or []:
+            if not item.get("available", True):
+                continue
+            kind = self._item_kind(item)
+            if kind in pools:
+                pools[kind].append(item)
+        return pools
+
+    @classmethod
+    def _tier_size_gb(cls, item: dict) -> float:
+        """解析档位代表的流量体积（GB），解析不出返回 0。"""
+        for text in (item.get("name"), item.get("gain")):
+            matched = cls._TIER_SIZE_RE.search(str(text or ""))
+            if not matched:
+                continue
+            try:
+                value = float(matched.group(1))
+            except ValueError:
+                continue
+            return value * cls._SIZE_TO_GB.get(matched.group(2).upper(), 1.0)
+        try:
+            amount = float(item.get("b_amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        return amount / (1024 ** 3) if amount > 0 else 0.0
+
+    def _budget_for(self, bonus_info: dict) -> float:
+        """按兑换策略计算本轮可花掉的魔力值。"""
+        current_bonus = bonus_info.get("current_bonus", 0) or 0
+        if self._strategy == "maximize":
+            return current_bonus
+        return current_bonus - self._keep_balance
+
+    def _select_best_item(self, bonus_info: dict,
+                          prefer: Optional[str] = None) -> Tuple[List[dict], Optional[dict], float]:
+        """
+        选出当前预算下性价比最高的一档。
+
+        :param bonus_info: 魔力商店信息
+        :param prefer: 限定类别 upload/download；为空时按配置的兑换类型取全部流量档
+        :return: (候选档位列表, 选中的档位, 可用预算)，选不出时第二项为 None
+        """
+        items = bonus_info.get("available_items") or []
+        if prefer in ("upload", "download"):
+            pool = self._split_by_kind(items)[prefer]
+        else:
+            pool = [item for item in self._filter_traffic_items(items) if item.get("available", True)]
+        budget = self._budget_for(bonus_info)
+        if not pool or budget <= 0:
+            return pool, None, budget
+        ranked = sorted(pool, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
+        for item in ranked:
+            if (item.get("cost") or float("inf")) <= budget:
+                return pool, item, budget
+        return pool, None, budget
+
+    def _pick_next_step(self, bonus_info: dict) -> Tuple[Optional[dict], str]:
+        """
+        决定下一笔兑换哪个档位：「上传+下载」模式下上传档可用时只换上传量，
+        上传档被站点全部禁用时换一笔下载量把分享率压回去，直到上传档重新可兑换。
+
+        :param bonus_info: 魔力商店信息
+        :return: (下一步档位, 停止原因)，档位为 None 时 reason 说明原因
+        """
+        budget = self._budget_for(bonus_info)
+        if budget <= 0:
+            if self._strategy == "maximize":
+                return None, "魔力值已用尽"
+            return None, "已达保留值，不继续兑换"
+
+        if self._exchange_type == "both":
+            upload_pool, upload_best, _ = self._select_best_item(bonus_info, prefer="upload")
+            if upload_pool:
+                if not upload_best:
+                    return None, f"上传量档位最低消耗已超过可用魔力值 {self._fmt_num(budget)}"
+                return upload_best, ""
+            download_pool = self._split_by_kind(bonus_info.get("available_items") or [])["download"]
+            if not download_pool:
+                return None, "上传量档位已全部被站点禁用，且没有可用的下载量档位来压低分享率解锁"
+            # 解锁用的下载量按最小步进优先：分享率降得最慢，冲过站点阈值的幅度最小；
+            # 解析不出体积的档位排在最后，避免把大额档当成小额档一步压过头
+            ranked = sorted(download_pool,
+                            key=lambda x: (self._tier_size_gb(x) or float("inf"), x.get("cost") or 0))
+            for item in ranked:
+                if (item.get("cost") or float("inf")) <= budget:
+                    return item, ""
+            min_cost = min((item.get("cost") or 0) for item in download_pool)
+            return None, (f"下载量档位最低消耗 {self._fmt_num(min_cost)} 已超过可用魔力值 "
+                          f"{self._fmt_num(budget)}")
+
+        _, best_item, _ = self._select_best_item(bonus_info)
+        if best_item:
+            return best_item, ""
+        return None, "没有预算内可兑换的档位"
+
+    def _latest_site_traffic(self, site_url: str) -> Optional[dict]:
+        """
+        取站点最近一次上报的上传量/下载量，用于预测兑换后的分享率。
+        站点用户数据里的流量单位是字节，这里统一换算成 GB，与档位体积同一量纲。
+
+        :param site_url: 站点地址
+        :return: {upload, download, ratio, updated_day}，取不到时 None
+        """
+        try:
+            domain = StringUtils.get_url_domain(site_url)
+            if not domain:
+                return None
+            rows = SiteOper().get_userdata_by_domain(domain) or []
+            current = [row for row in rows if not row.err_msg] or rows
+            if not current:
+                return None
+            latest = max(current, key=lambda row: (str(row.updated_day or ""),
+                                                   str(row.updated_time or ""), row.id or 0))
+            upload = float(latest.upload or 0) / (1024 ** 3)
+            download = float(latest.download or 0) / (1024 ** 3)
+            if upload <= 0 or download <= 0:
+                return None
+            return {
+                "upload": upload,
+                "download": download,
+                # 与预测口径一致，统一用上传/下载重算，站点原值仅作展示参考
+                "ratio": upload / download,
+                "ratio_site": float(latest.ratio or 0),
+                "updated_day": latest.updated_day,
+            }
+        except Exception as e:
+            logger.debug(f"{site_url} 读取站点用户数据失败: {str(e)}")
+            return None
+
+    def _simulate_ratio(self, traffic: Optional[dict], steps: List[dict]) -> str:
+        """
+        按「兑换上传量增加上传、兑换下载量增加下载」的方向推演一串步骤后的分享率。
+        方向以用户站点实际语义为准，取不到基线时返回空串。
+
+        :param traffic: _latest_site_traffic 结果
+        :param steps: 步骤列表，每项需含 kind 与 gb
+        :return: 形如 "11.44 → 8.02" 的文本
+        """
+        if not traffic:
+            return ""
+        upload = float(traffic.get("upload") or 0)
+        download = float(traffic.get("download") or 0)
+        if upload <= 0 or download <= 0:
+            return ""
+        before = upload / download
+        for step in steps:
+            size = step.get("gb") or 0
+            if step.get("kind") == "upload":
+                upload += size
+            elif step.get("kind") == "download":
+                download += size
+        after = upload / download if download > 0 else 0
+        return f"{before:.2f} → {after:.2f}"
+
+    def _dry_run_site(self, site_name: str, site_url: str,
+                      bonus_info: dict, result: dict) -> Tuple[str, dict]:
+        """
+        演练模式：按保活规则离线推演兑换顺序，只输出计划与预测分享率，不提交任何兑换。
+        不重新请求商店，因此档位禁用状态不会真的变化，上传档被禁用时按「已解锁」推演后续花费。
+
+        :param site_name: 站点名称
+        :param site_url: 站点地址
+        :param bonus_info: 首次解析到的商店信息
+        :param result: 本站结果字典
+        :return: (站点名称, 结果)
+        """
+        traffic = self._latest_site_traffic(site_url)
+        items = bonus_info.get("available_items") or []
+        pools = self._split_by_kind(items)
+        upload_items = [item for item in self._filter_traffic_items(items)
+                        if self._item_kind(item) == "upload"]
+        upload_locked = bool(upload_items) and not pools["upload"]
+
+        unlocked_info = dict(bonus_info)
+        unlocked_info["available_items"] = [dict(item, available=True) for item in items]
+
+        steps: List[dict] = []
+        running = bonus_info.get("current_bonus", 0) or 0
+        reason = ""
+        max_steps = max(1, self._max_steps)
+        download_steps = 0
+        # 上传档被禁用时：先按真实（禁用）视图推演下载压分享率，
+        # 达到次数上限后改按「假设已解锁」视图推演剩余花费，演练不提交兑换所以状态不会真的变化
+        views = ([bonus_info, unlocked_info]
+                 if (self._exchange_type == "both" and upload_locked) else [bonus_info])
+        view_index = 0
+        while len(steps) < max_steps:
+            sim_info = dict(views[view_index])
+            sim_info["current_bonus"] = running
+            item, stop_reason = self._pick_next_step(sim_info)
+            if not item:
+                reason = stop_reason
+                break
+            kind = self._item_kind(item)
+            steps.append({
+                "item": item.get("name"),
+                "kind": kind,
+                "cost": item.get("cost") or 0,
+                "gb": self._tier_size_gb(item),
+            })
+            running -= (item.get("cost") or 0)
+            if kind == "download" and view_index == 0 and len(views) > 1:
+                download_steps += 1
+                if download_steps >= max(1, self._max_download_to_unlock):
+                    view_index = 1
+
+        if not steps:
+            result["status"] = "skipped"
+            result["error"] = f"演练模式未提交兑换：无可推演档位（{reason or '商店没有可用档位'}）"
+            logger.info(f"{site_name} 演练模式：无可推演档位")
+            return site_name, result
+
+        lines = []
+        for index, step in enumerate(steps, 1):
+            text = (f"{index}. {step['item']} → {self._fmt_num(step['gb'])} GB"
+                    f"{self._KIND_LABELS.get(step['kind'], '')}，消耗 {self._fmt_num(step['cost'])}")
+            lines.append(text)
+        total_cost = sum(step["cost"] for step in steps)
+        base_text = (f"基线分享率 {traffic['ratio']:.2f}（{traffic['updated_day']} 站点数据）"
+                     if traffic else "未取到站点上传/下载基线，跳过分享率预测")
+        if len(views) > 1:
+            base_text += f"；前 {download_steps} 笔为压低分享率解锁上传档，之后按上传档已解锁推演花费"
+        summary = (f"演练模式未提交兑换：共 {len(steps)} 笔，预计消耗 {self._fmt_num(total_cost)} 魔力；"
+                   f"{base_text}；预测分享率 {self._simulate_ratio(traffic, steps) or '未知'}")
+        if not reason:
+            reason = "已达单站单轮最多兑换次数上限" if len(steps) >= max_steps else "预算用尽"
+        result["dry_run"] = {
+            "steps": len(steps),
+            "cost": total_cost,
+            "reason": reason,
+            "predicted": self._simulate_ratio(traffic, steps),
+        }
+        result["status"] = "skipped"
+        result["error"] = f"{summary}\n" + "\n".join(lines) + f"\n停止原因: {reason}"
+        logger.info(f"{site_name} 演练计划：\n{result['error']}")
+        return site_name, result
 
     def _exchange_site(self, site_info: dict) -> Tuple[str, dict]:
         """
@@ -895,34 +1278,8 @@ class AutoBonusExchange(_PluginBase):
             # 如果是API模式，使用API获取兑换项目
             if is_api_mode:
                 logger.info(f"{site_name} 使用API模式获取兑换项目")
-                bonus_info = self._parse_api_bonus_page(req_utils, site_url, res.text)
-            else:
-                bonus_info = adapter.parse_bonus_page(res.text)
-
-            # 调试：保存 HTML 到文件
-            try:
-                debug_dir = "/config/temp/bonus_debug"
-                import os
-                os.makedirs(debug_dir, exist_ok=True)
-                debug_file = f"{debug_dir}/{site_name.replace(' ', '_')}_mybonus.html"
-                with open(debug_file, "w", encoding="utf-8") as f:
-                    f.write(res.text)
-                logger.info(f"{site_name} HTML 已保存到: {debug_file}")
-            except Exception as e:
-                logger.debug(f"保存调试文件失败: {e}")
-
-            # 调试：输出 HTML 关键部分
-            if bonus_info and not bonus_info.get("available_items"):
-                # 输出前 2000 字符用于调试
-                logger.debug(f"{site_name} mybonus.php HTML 前 2000 字符:\n{res.text[:2000]}")
-                # 查找 form 标签
-                form_match = re.search(r'<form[^>]*>.*?</form>', res.text, re.DOTALL | re.IGNORECASE)
-                if form_match:
-                    logger.debug(f"{site_name} 找到 form:\n{form_match.group(0)[:1500]}")
-                # 查找 table 标签
-                table_match = re.search(r'<table[^>]*>.*?</table>', res.text, re.DOTALL | re.IGNORECASE)
-                if table_match:
-                    logger.debug(f"{site_name} 找到 table:\n{table_match.group(0)[:1500]}")
+            bonus_info, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                   bonus_url, adapter, save_debug=True)
 
             if not bonus_info:
                 result["status"] = "failed"
@@ -943,10 +1300,16 @@ class AutoBonusExchange(_PluginBase):
                 logger.info(f"{site_name} 魔力值不足，跳过")
                 return site_name, result
 
-            # 根据策略计算兑换方案
-            exchange_plan = self._calculate_exchange_plan(bonus_info)
+            # 演练模式：只输出计划与预测分享率，不提交任何兑换
+            if self._dry_run:
+                return self._dry_run_site(site_name, site_url, bonus_info, result)
 
-            if not exchange_plan:
+            # 兑换类型决定执行方式：「上传+下载」逐笔决策，换下载量后重抓商店刷新禁用状态；
+            # 「仅上传量」「仅下载量」沿用一次算好的静态方案，与旧版行为一致
+            oscillate = self._exchange_type == "both"
+            exchange_plan = [] if oscillate else self._calculate_exchange_plan(bonus_info)
+
+            if not oscillate and not exchange_plan:
                 result["status"] = "skipped"
                 result["error"] = self._diagnose_no_plan(bonus_info)
                 logger.info(f"{site_name} 无可用兑换方案: {result['error']}")
@@ -954,7 +1317,26 @@ class AutoBonusExchange(_PluginBase):
 
             # 执行兑换
             running_bonus = bonus_info.get("current_bonus", 0) or 0
-            for item in exchange_plan:
+            live_info = dict(bonus_info)
+            delta_steps: List[dict] = []
+            ratio_traffic = None
+            download_fail = 0
+            stop_reason = ""
+            max_steps = max(1, self._max_steps) if oscillate else len(exchange_plan)
+            for step_index in range(max_steps):
+                if oscillate:
+                    live_info["current_bonus"] = running_bonus
+                    item, stop_reason = self._pick_next_step(live_info)
+                    if not item:
+                        if not result["exchanged"]:
+                            result["error"] = stop_reason or self._diagnose_no_plan(live_info)
+                        else:
+                            result["note"] = f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}"
+                        logger.info(f"{site_name} 停止兑换：{result.get('error') or result.get('note')}")
+                        break
+                else:
+                    item = exchange_plan[step_index]
+
                 # 检查项目是否可用
                 if not item.get("available", True):
                     logger.info(f"{site_name} 跳过不可用项目: {item.get('name')}")
@@ -962,6 +1344,14 @@ class AutoBonusExchange(_PluginBase):
                 
                 # 如果是API模式，使用API兑换
                 bonus_of_item = running_bonus
+                kind = self._item_kind(item)
+                is_unlock_step = oscillate and kind == "download"
+                if is_unlock_step and ratio_traffic is None:
+                    ratio_traffic = self._latest_site_traffic(site_url)
+                    if ratio_traffic:
+                        result["ratio_before"] = round(ratio_traffic["ratio"], 4)
+                        logger.info(f"{site_name} 分享率基线 {ratio_traffic['ratio']:.2f}"
+                                    f"（{ratio_traffic['updated_day']} 站点数据）")
                 if is_api_mode:
                     exchange_result = self._exchange_api_item(
                         req_utils=req_utils,
@@ -997,8 +1387,38 @@ class AutoBonusExchange(_PluginBase):
                     # 用站点确认后的余额继续比对下一笔，取不到就按消耗推算
                     observed_bonus = exchange_result.get("bonus_after")
                     running_bonus = observed_bonus if observed_bonus else running_bonus - (item.get("cost") or 0)
+                    delta_steps.append({"kind": kind, "gb": self._tier_size_gb(item)})
+                    predicted = self._simulate_ratio(ratio_traffic, delta_steps)
+                    if predicted:
+                        result["ratio_predict"] = predicted
                     # 限速
                     time.sleep(self._rate_limit_ms / 1000)
+
+                    # 换下载量的唯一目的是让分享率回落到允许兑换上传量的区间：
+                    # 立即重抓商店页刷新档位禁用状态，上传档重新可兑换就切回上传
+                    if is_unlock_step:
+                        refreshed, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                              bonus_url, adapter, save_debug=False)
+                        if not refreshed:
+                            stop_reason = "兑换下载量后重新获取魔力商店失败"
+                            result["note"] = (f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}，"
+                                              "档位状态未确认")
+                            break
+                        live_info = refreshed
+                        running_bonus = refreshed.get("current_bonus", 0) or running_bonus
+                        if self._split_by_kind(refreshed.get("available_items") or [])["upload"]:
+                            download_fail = 0
+                            result["note"] = f"兑换 {item.get('name')} 后上传量档位已解锁"
+                            logger.info(f"{site_name} {result['note']}")
+                        else:
+                            download_fail += 1
+                            logger.info(f"{site_name} 兑换 {item.get('name')} 后上传量档位仍不可兑换"
+                                        f"（连续 {download_fail} 次）")
+                            if download_fail >= max(1, self._max_download_to_unlock):
+                                stop_reason = ("连续兑换下载量后上传量档位仍未解锁，"
+                                               "禁用原因可能不是分享率（等级或次数限制）")
+                                result["note"] = (f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}")
+                                break
                 else:
                     fail_detail = (f"{exchange_result.get('error')}（余额 {bonus_of_item} → "
                                    f"{exchange_result.get('bonus_after') or '未知'}）")
@@ -1015,6 +1435,9 @@ class AutoBonusExchange(_PluginBase):
                     else:
                         result["error"] = f"{item.get('name')} 兑换失败：{fail_detail}"
                     break
+
+            if oscillate and not stop_reason and len(result["exchanged"]) >= max_steps:
+                result["note"] = f"已达单站单轮最多兑换次数上限 {max_steps}，剩余档位下次运行继续"
 
             # 重新获取魔力值
             res = req_utils.get_res(url=bonus_url)
@@ -1044,21 +1467,21 @@ class AutoBonusExchange(_PluginBase):
         :param bonus_info: 魔力商店信息
         :return: 兑换方案列表
         """
-        current_bonus = bonus_info.get("current_bonus", 0)
         available_items = bonus_info.get("available_items", [])
-
         if not available_items:
             return []
 
+        # 「仅上传量」「仅下载量」：选出最优档位后重复兑换到预算用尽
+        _, best_item, budget = self._select_best_item(bonus_info)
+        if not best_item:
+            return []
+
         plan = []
-
-        if self._strategy == "maximize":
-            # 最大化策略
-            plan = self._maximize_strategy(available_items, current_bonus)
-        else:
-            # 保留余额策略（默认）
-            plan = self._keep_balance_strategy(available_items, current_bonus)
-
+        remaining = budget
+        cost = best_item.get("cost") or 0
+        while cost > 0 and remaining >= cost:
+            plan.append(best_item)
+            remaining -= cost
         return plan
 
     def _diagnose_no_plan(self, bonus_info: dict) -> str:
@@ -1079,10 +1502,20 @@ class AutoBonusExchange(_PluginBase):
             return (f"商店里没有「{type_name}」类档位，当前兑换类型设置为 {self._exchange_type}\n"
                     f"可改为「上传量/下载量」或换档位")
 
+        tiers = "、".join([f"{item.get('name')}({item.get('cost')})" for item in traffic_items[:3]])
         usable_items = [item for item in traffic_items if item.get("available", True)]
+        uploads = [item for item in traffic_items if self._item_kind(item) == "upload"]
+        downloads = [item for item in traffic_items
+                     if self._item_kind(item) == "download" and item.get("available", True)]
+        upload_usable = [item for item in traffic_items
+                         if self._item_kind(item) == "upload" and item.get("available", True)]
+        no_download_to_unlock = (self._exchange_type == "both" and bool(uploads) and not downloads)
         if not usable_items:
-            tiers = "、".join([f"{item.get('name')}({item.get('cost')})" for item in traffic_items[:3]])
-            return (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、等级或次数受限）\n"
+            text = (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、等级或次数受限）\n"
+                    f"禁用档位: {tiers}")
+            return text + ("\n商店没有可用的下载量档位来压低分享率解锁上传档" if no_download_to_unlock else "")
+        if no_download_to_unlock and not upload_usable:
+            return ("上传量档位已全部被站点禁用，且没有可用的下载量档位来压低分享率解锁\n"
                     f"禁用档位: {tiers}")
 
         min_cost = min(item.get("cost", 0) for item in usable_items)
@@ -1112,80 +1545,6 @@ class AutoBonusExchange(_PluginBase):
                 filtered.append(item)
         
         return filtered
-
-    def _maximize_strategy(self, items: List[dict], current_bonus: float) -> List[dict]:
-        """最大化兑换策略：重复兑换性价比最高的档位直到魔力值不足。"""
-        plan = []
-        remaining_bonus = current_bonus
-
-        if remaining_bonus <= 0:
-            return []
-
-        # 只选择可用的项目
-        available_items = [i for i in items if i.get("available", True)]
-        
-        # 根据兑换类型筛选
-        traffic_items = self._filter_traffic_items(available_items)
-
-        if not traffic_items:
-            return []
-
-        # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
-        sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
-        
-        # 找到成本不超过当前魔力值的最高性价比档位
-        best_item = None
-        for item in sorted_items:
-            if item.get("cost", float("inf")) <= remaining_bonus:
-                best_item = item
-                break
-        
-        if not best_item:
-            return []
-
-        # 重复兑换性价比最高的可用档位
-        while remaining_bonus >= best_item.get("cost", float("inf")):
-            plan.append(best_item)
-            remaining_bonus -= best_item.get("cost", 0)
-
-        return plan
-
-    def _keep_balance_strategy(self, items: List[dict], current_bonus: float) -> List[dict]:
-        """保留余额策略：扣除保留值后，重复兑换性价比最高的档位。"""
-        plan = []
-        available_bonus = current_bonus - self._keep_balance
-
-        if available_bonus <= 0:
-            return []
-
-        # 只选择可用的项目
-        available_items = [i for i in items if i.get("available", True)]
-        
-        # 根据兑换类型筛选
-        traffic_items = self._filter_traffic_items(available_items)
-
-        if not traffic_items:
-            return []
-
-        # 按性价比排序，性价比相同时优先选最大档位（消耗高的）
-        sorted_items = sorted(traffic_items, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
-
-        # 找到成本不超过可用魔力值的最高性价比档位
-        best_item = None
-        for item in sorted_items:
-            if item.get("cost", float("inf")) <= available_bonus:
-                best_item = item
-                break
-        
-        if not best_item:
-            return []
-
-        # 重复兑换性价比最高的可用档位
-        while available_bonus >= best_item.get("cost", float("inf")):
-            plan.append(best_item)
-            available_bonus -= best_item.get("cost", 0)
-
-        return plan
 
     def _parse_api_bonus_page(self, req_utils: RequestUtils, site_url: str, html: str) -> Optional[dict]:
         """
@@ -1343,6 +1702,8 @@ class AutoBonusExchange(_PluginBase):
 
     # 把冗长的跳过原因压成短标签，同类站点合并成一行（按顺序优先匹配）
     _SKIP_LABELS = (
+        ("上传档禁用且无下载档可解锁", ("没有可用的下载量档位",)),
+        ("演练模式未提交兑换", ("演练模式",)),
         ("站点已禁用全部档位", ("全部被站点禁用",)),
         ("未达保留值", ("未超过保留值",)),
         ("商店未解析到兑换项", ("没有解析到兑换项",)),
@@ -1445,6 +1806,9 @@ class AutoBonusExchange(_PluginBase):
                 note = self._one_line(site_result.get("note"), 80)
                 if note:
                     line += f"；{note}"
+                predict = self._one_line(site_result.get("ratio_predict"), 40)
+                if predict:
+                    line += f"；分享率 {predict}"
                 exchanged_lines.append(line)
             elif status == "failed":
                 reason = self._one_line(site_result.get("error") or "未知原因", 100)
