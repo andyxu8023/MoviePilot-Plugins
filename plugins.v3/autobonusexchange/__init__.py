@@ -40,7 +40,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.1.2"
+    plugin_version = "2.1.4"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -68,10 +68,12 @@ class AutoBonusExchange(_PluginBase):
     _max_retry: int = 3
     _circuit_break_threshold: int = 5
     _rate_limit_ms: int = 1000
-    # 「上传+下载」保活模式：单站单轮最多兑换次数
-    _max_steps: int = 10
-    # 上传档被禁用后，连续换几笔下载仍未解锁就停止
-    _max_download_to_unlock: int = 2
+    # 「上传+下载」保活模式：单站单轮最多兑换次数，0 表示不限制
+    _max_steps: int = 0
+    # 上传档被禁用后，连续换几笔下载仍未解锁就停止，0 表示不限制
+    _max_download_to_unlock: int = 0
+    # 不限制时的内部硬上限：防止消耗解析为 0 的异常档位或站点余额不变导致循环卡死
+    _HARD_MAX_STEPS = 100
 
     # 运行时状态
     _today_data: dict = {}
@@ -105,8 +107,9 @@ class AutoBonusExchange(_PluginBase):
             self._circuit_break_threshold = int(config.get("circuit_break_threshold", 5))
             self._rate_limit_ms = int(config.get("rate_limit_ms", 1000))
             self._force_run = config.get("force_run", False)
-            self._max_steps = int(config.get("max_steps", 10) or 10)
-            self._max_download_to_unlock = int(config.get("max_download_to_unlock", 2) or 2)
+            # 留空、0 或负数都按「不限制」处理
+            self._max_steps = max(0, int(config.get("max_steps") or 0))
+            self._max_download_to_unlock = max(0, int(config.get("max_download_to_unlock") or 0))
 
             # 过滤掉已删除的站点
             all_sites = [site.id for site in SiteOper().list_order_by_pri()]
@@ -341,8 +344,9 @@ class AutoBonusExchange(_PluginBase):
                                         "model": "max_steps",
                                         "label": "单站单轮最多兑换次数",
                                         "type": "number",
-                                        "placeholder": "10",
-                                        "hint": "「上传+下载」按分享率保活逐笔兑换时生效，配合请求间隔控制单轮耗时",
+                                        "placeholder": "留空或 0 = 不限制",
+                                        "hint": "「上传+下载」按分享率保活逐笔兑换时生效，默认不限制、换到预算用完为止；"
+                                                "填数值可配合请求间隔控制单轮耗时",
                                         "persistent_hint": True
                                     }
                                 }]
@@ -356,8 +360,9 @@ class AutoBonusExchange(_PluginBase):
                                         "model": "max_download_to_unlock",
                                         "label": "解锁上传最多换下载(次)",
                                         "type": "number",
-                                        "placeholder": "2",
-                                        "hint": "上传档被站点禁用后，连续兑换下载量仍不允许兑换上传时停止，避免继续压低分享率",
+                                        "placeholder": "留空或 0 = 不限制",
+                                        "hint": "默认不限制：上传档被站点禁用后一直换下载，直到上传档解锁或下载档换完；"
+                                                "填数值可限制连续换下载的次数，避免分享率被压过头",
                                         "persistent_hint": True
                                     }
                                 }]
@@ -429,8 +434,8 @@ class AutoBonusExchange(_PluginBase):
             "max_retry": 3,
             "circuit_break_threshold": 5,
             "rate_limit_ms": 1000,
-            "max_steps": 10,
-            "max_download_to_unlock": 2,
+            "max_steps": 0,
+            "max_download_to_unlock": 0,
             "force_run": False,
         }
 
@@ -938,6 +943,25 @@ class AutoBonusExchange(_PluginBase):
             amount = 0.0
         return amount / (1024 ** 3) if amount > 0 else 0.0
 
+    def _step_limit(self) -> int:
+        """单站单轮兑换次数上限：配置为 0/留空表示不限制，但仍受内部硬上限保护。"""
+        if self._max_steps and self._max_steps > 0:
+            return int(self._max_steps)
+        return self._HARD_MAX_STEPS
+
+    def _step_limit_reason(self) -> str:
+        """达到次数上限时的说明文案，区分用户设置的上限与内部硬上限。"""
+        if self._max_steps and self._max_steps > 0:
+            return f"已达单站单轮最多兑换次数上限 {int(self._max_steps)}"
+        return (f"单站单轮兑换次数达到内部硬上限 {self._HARD_MAX_STEPS}"
+                f"（余额或档位异常，剩余档位下次运行继续）")
+
+    def _unlock_download_limit(self) -> Optional[int]:
+        """解锁上传档允许连续换几笔下载量：0/留空表示不限制，返回 None。"""
+        if self._max_download_to_unlock and self._max_download_to_unlock > 0:
+            return int(self._max_download_to_unlock)
+        return None
+
     def _budget_for(self, bonus_info: dict) -> float:
         """按兑换策略计算本轮可花掉的魔力值。"""
         current_bonus = bonus_info.get("current_bonus", 0) or 0
@@ -1091,7 +1115,8 @@ class AutoBonusExchange(_PluginBase):
         steps: List[dict] = []
         running = bonus_info.get("current_bonus", 0) or 0
         reason = ""
-        max_steps = max(1, self._max_steps)
+        max_steps = self._step_limit()
+        unlock_limit = self._unlock_download_limit()
         download_steps = 0
         # 上传档被禁用时：先按真实（禁用）视图推演下载压分享率，
         # 达到次数上限后改按「假设已解锁」视图推演剩余花费，演练不提交兑换所以状态不会真的变化
@@ -1115,7 +1140,7 @@ class AutoBonusExchange(_PluginBase):
             running -= (item.get("cost") or 0)
             if kind == "download" and view_index == 0 and len(views) > 1:
                 download_steps += 1
-                if download_steps >= max(1, self._max_download_to_unlock):
+                if unlock_limit is not None and download_steps >= unlock_limit:
                     view_index = 1
 
         if not steps:
@@ -1132,12 +1157,16 @@ class AutoBonusExchange(_PluginBase):
         total_cost = sum(step["cost"] for step in steps)
         base_text = (f"基线分享率 {traffic['ratio']:.2f}（{traffic['updated_day']} 站点数据）"
                      if traffic else "未取到站点上传/下载基线，跳过分享率预测")
-        if len(views) > 1:
-            base_text += f"；前 {download_steps} 笔为压低分享率解锁上传档，之后按上传档已解锁推演花费"
+        if view_index > 0:
+            base_text += (f"；前 {download_steps} 笔为压低分享率解锁上传档，"
+                          f"之后按上传档已解锁推演花费")
+        elif len(views) > 1:
+            base_text += (f"；换下载解锁上传档未设次数上限，整轮 {download_steps} 笔都按下载档推演"
+                          f"（真跑时上传档一解锁就切回上传）")
         summary = (f"演练模式未提交兑换：共 {len(steps)} 笔，预计消耗 {self._fmt_num(total_cost)} 魔力；"
                    f"{base_text}；预测分享率 {self._simulate_ratio(traffic, steps) or '未知'}")
         if not reason:
-            reason = "已达单站单轮最多兑换次数上限" if len(steps) >= max_steps else "预算用尽"
+            reason = self._step_limit_reason() if len(steps) >= max_steps else "预算用尽"
         result["dry_run"] = {
             "steps": len(steps),
             "cost": total_cost,
@@ -1322,7 +1351,8 @@ class AutoBonusExchange(_PluginBase):
             ratio_traffic = None
             download_fail = 0
             stop_reason = ""
-            max_steps = max(1, self._max_steps) if oscillate else len(exchange_plan)
+            max_steps = self._step_limit() if oscillate else len(exchange_plan)
+            unlock_limit = self._unlock_download_limit()
             for step_index in range(max_steps):
                 if oscillate:
                     live_info["current_bonus"] = running_bonus
@@ -1414,7 +1444,7 @@ class AutoBonusExchange(_PluginBase):
                             download_fail += 1
                             logger.info(f"{site_name} 兑换 {item.get('name')} 后上传量档位仍不可兑换"
                                         f"（连续 {download_fail} 次）")
-                            if download_fail >= max(1, self._max_download_to_unlock):
+                            if unlock_limit is not None and download_fail >= unlock_limit:
                                 stop_reason = ("连续兑换下载量后上传量档位仍未解锁，"
                                                "禁用原因可能不是分享率（等级或次数限制）")
                                 result["note"] = (f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}")
@@ -1437,7 +1467,7 @@ class AutoBonusExchange(_PluginBase):
                     break
 
             if oscillate and not stop_reason and len(result["exchanged"]) >= max_steps:
-                result["note"] = f"已达单站单轮最多兑换次数上限 {max_steps}，剩余档位下次运行继续"
+                result["note"] = f"{self._step_limit_reason()}，剩余档位下次运行继续"
 
             # 重新获取魔力值
             res = req_utils.get_res(url=bonus_url)
@@ -1449,7 +1479,7 @@ class AutoBonusExchange(_PluginBase):
                 if new_bonus_info:
                     result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
 
-            result["status"] = "success" if result["exchanged"] else ("failed" if result.get("error") else "skipped")
+            self._finish_site_status(result)
 
         except Exception as e:
             result["status"] = "failed"
@@ -1701,14 +1731,30 @@ class AutoBonusExchange(_PluginBase):
         self._circuit_breaker[site_name] = current + 1
 
     # 把冗长的跳过原因压成短标签，同类站点合并成一行（按顺序优先匹配）
+    # 「没花钱的原因是设置或站点限制，不是插件出错」这类短句：统一按跳过处理，不进【失败】
+    _BENIGN_STOP_KEYWORDS = (
+        "超过可用魔力值",
+        "可用魔力值不足",
+        "最低档位消耗",
+        "已达保留值",
+        "未超过保留值",
+        "魔力值已用尽",
+        "没有预算内可兑换的档位",
+        "没有可用的下载量档位",
+        "全部被站点禁用",
+        "没有解析到兑换项",
+        "商店里没有「",
+        "演练模式",
+    )
     _SKIP_LABELS = (
         ("上传档禁用且无下载档可解锁", ("没有可用的下载量档位",)),
         ("演练模式未提交兑换", ("演练模式",)),
         ("站点已禁用全部档位", ("全部被站点禁用",)),
-        ("未达保留值", ("未超过保留值",)),
+        ("未达保留值", ("未超过保留值", "已达保留值")),
         ("商店未解析到兑换项", ("没有解析到兑换项",)),
         ("没有匹配的档位类型", ("商店里没有「",)),
-        ("可用魔力值不足", ("可用魔力值不足",)),
+        ("可用魔力值不足", ("可用魔力值不足", "超过可用魔力值", "魔力值已用尽",
+                            "没有预算内可兑换的档位")),
         ("余额低于最低档位", ("最低档位消耗",)),
         ("本轮连续失败已熔断", ("熔断",)),
     )
@@ -1735,6 +1781,26 @@ class AutoBonusExchange(_PluginBase):
         """只取原因首行并压缩空白，多行说明留给插件页面展示。"""
         line = re.sub(r"\s+", " ", str(value or "").split("\n", 1)[0]).strip()
         return f"{line[:limit]}…" if len(line) > limit else line
+
+    @classmethod
+    def _is_benign_stop(cls, error: Any) -> bool:
+        """判断未产生兑换的原因是否属于「按设置/站点限制没花钱」，而不是插件出错。"""
+        raw = str(error or "")
+        return any(keyword in raw for keyword in cls._BENIGN_STOP_KEYWORDS)
+
+    def _finish_site_status(self, result: dict) -> None:
+        """
+        收尾单站状态：兑到东西算成功，没兑到再区分是限制（跳过）还是出错（失败）。
+
+        余额没超过保留值、档位最低消耗超出预算、上传档全禁用又没有下载档可解锁，
+        这些都是设置或站点限制，魔力一分没动，不该出现在通知的【失败】里。
+        """
+        if result.get("exchanged"):
+            result["status"] = "success"
+        elif result.get("error") and not self._is_benign_stop(result.get("error")):
+            result["status"] = "failed"
+        else:
+            result["status"] = "skipped"
 
     @classmethod
     def _skip_label(cls, error: Any) -> str:
@@ -1818,8 +1884,8 @@ class AutoBonusExchange(_PluginBase):
                 if label not in skip_groups:
                     skip_groups[label] = []
                     skip_order.append(label)
-                # 未达保留值的站点带上余额，其余只列站名，保证一行读完
-                if label == "未达保留值":
+                # 因预算/保留值限制的站点带上余额，其余只列站名，保证一行读完
+                if label in ("未达保留值", "可用魔力值不足", "余额低于最低档位"):
                     skip_groups[label].append(
                         f"{site_name} {self._fmt_num(site_result.get('bonus_before'))}"
                     )
