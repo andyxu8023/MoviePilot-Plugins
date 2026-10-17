@@ -10,6 +10,7 @@ import re
 import time
 import traceback
 from datetime import datetime, timedelta
+from html import unescape as _html_unescape
 from multiprocessing.dummy import Pool as ThreadPool
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -40,7 +41,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.1.4"
+    plugin_version = "2.1.5"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -688,9 +689,9 @@ class AutoBonusExchange(_PluginBase):
                         f"（-{self._fmt_num(site_cost)}）")
 
             lines = [head]
-            ratio_predict = self._one_line(result.get("ratio_predict"), 60)
-            if ratio_predict:
-                lines.append(f"预测分享率 {ratio_predict}")
+            ratio_text = self._ratio_text(result)
+            if ratio_text:
+                lines.append(ratio_text)
             for row in rows:
                 # 同档位多笔合并成一行，移动端不被重复条目刷屏；单笔不带 ×1
                 label = row["name"] if row["count"] == 1 else f"{row['name']} ×{row['count']}"
@@ -889,6 +890,9 @@ class AutoBonusExchange(_PluginBase):
                 if table_match:
                     logger.debug(f"{site_name} 找到 table:\n{table_match.group(0)[:1500]}")
 
+        if bonus_info is not None:
+            # 商店页头部就带站点自己的分享率，顺手取下来，不必再去抓用户中心页
+            bonus_info["user_ratio"] = self._parse_page_ratio(html)
         return bonus_info, res
 
     # 档位名里的体积解析，支持 KB/MB/GB/TB 与 KiB/MiB/GiB/TiB 写法
@@ -1031,6 +1035,30 @@ class AutoBonusExchange(_PluginBase):
             return best_item, ""
         return None, "没有预算内可兑换的档位"
 
+    # 商店页统计块的分享率，标签与数值之间可能夹冒号、方括号、全角符号与空白
+    _PAGE_RATIO_RE = re.compile(r"分享率[^0-9\n]{0,12}(\d[\d,]*(?:\.\d+)?)")
+
+    @classmethod
+    def _parse_page_ratio(cls, html_text: str) -> Optional[float]:
+        """
+        直接读取魔力商店页上站点显示的分享率，取不到时返回 None。
+
+        NexusPHP 魔力商店页头部就带「分享率: x.xxx」，与站点用户数据里的值同源，
+        但页面是当场抓的，比库里的每日快照更新，因此优先用它。
+        """
+        if not html_text:
+            return None
+        text = re.sub(r"\s+", " ", _html_unescape(re.sub(r"<[^>]+>", " ", html_text)))
+        for matched in cls._PAGE_RATIO_RE.finditer(text):
+            raw = matched.group(1).replace(",", "")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if 0 < value < 100000:
+                return value
+        return None
+
     def _latest_site_traffic(self, site_url: str) -> Optional[dict]:
         """
         取站点最近一次上报的上传量/下载量，用于预测兑换后的分享率。
@@ -1066,20 +1094,27 @@ class AutoBonusExchange(_PluginBase):
             return None
 
     def _simulate_ratio(self, traffic: Optional[dict], steps: List[dict]) -> str:
+        """按推演后的分享率给出「11.44 → 8.02」文本，取不到基线时返回空串。"""
+        pair = self._simulate_ratio_pair(traffic, steps)
+        return f"{pair[0]:.2f} → {pair[1]:.2f}" if pair else ""
+
+    @staticmethod
+    def _simulate_ratio_pair(traffic: Optional[dict],
+                             steps: List[dict]) -> Optional[Tuple[float, float]]:
         """
         按「兑换上传量增加上传、兑换下载量增加下载」的方向推演一串步骤后的分享率。
-        方向以用户站点实际语义为准，取不到基线时返回空串。
+        方向以用户站点实际语义为准，取不到基线时返回 None。
 
         :param traffic: _latest_site_traffic 结果
         :param steps: 步骤列表，每项需含 kind 与 gb
-        :return: 形如 "11.44 → 8.02" 的文本
+        :return: (兑换前分享率, 兑换后分享率)
         """
         if not traffic:
-            return ""
+            return None
         upload = float(traffic.get("upload") or 0)
         download = float(traffic.get("download") or 0)
         if upload <= 0 or download <= 0:
-            return ""
+            return None
         before = upload / download
         for step in steps:
             size = step.get("gb") or 0
@@ -1088,7 +1123,7 @@ class AutoBonusExchange(_PluginBase):
             elif step.get("kind") == "download":
                 download += size
         after = upload / download if download > 0 else 0
-        return f"{before:.2f} → {after:.2f}"
+        return before, after
 
     def _dry_run_site(self, site_name: str, site_url: str,
                       bonus_info: dict, result: dict) -> Tuple[str, dict]:
@@ -1102,7 +1137,14 @@ class AutoBonusExchange(_PluginBase):
         :param result: 本站结果字典
         :return: (站点名称, 结果)
         """
+        page_ratio = bonus_info.get("user_ratio")
+        # 演练不真兑换，要推演「照这个计划换完会变成多少」仍需绝对上传/下载量，这里照旧取站点数据基线
         traffic = self._latest_site_traffic(site_url)
+        display_before = page_ratio or (traffic or {}).get("ratio")
+        if display_before:
+            result["ratio_before"] = round(float(display_before), 4)
+            result["ratio_after"] = result["ratio_before"]
+            result["ratio_source"] = "站点页面" if page_ratio else "站点数据基线"
         items = bonus_info.get("available_items") or []
         pools = self._split_by_kind(items)
         upload_items = [item for item in self._filter_traffic_items(items)
@@ -1155,8 +1197,13 @@ class AutoBonusExchange(_PluginBase):
                     f"{self._KIND_LABELS.get(step['kind'], '')}，消耗 {self._fmt_num(step['cost'])}")
             lines.append(text)
         total_cost = sum(step["cost"] for step in steps)
-        base_text = (f"基线分享率 {traffic['ratio']:.2f}（{traffic['updated_day']} 站点数据）"
-                     if traffic else "未取到站点上传/下载基线，跳过分享率预测")
+        if page_ratio:
+            base_text = f"当前分享率 {float(page_ratio):.2f}（商店页显示值）"
+        elif traffic:
+            base_text = (f"基线分享率 {traffic['ratio']:.2f}"
+                         f"（{traffic['updated_day']} 站点数据）")
+        else:
+            base_text = "未取到站点分享率，跳过分享率预测"
         if view_index > 0:
             base_text += (f"；前 {download_steps} 笔为压低分享率解锁上传档，"
                           f"之后按上传档已解锁推演花费")
@@ -1167,6 +1214,9 @@ class AutoBonusExchange(_PluginBase):
                    f"{base_text}；预测分享率 {self._simulate_ratio(traffic, steps) or '未知'}")
         if not reason:
             reason = self._step_limit_reason() if len(steps) >= max_steps else "预算用尽"
+        ratio_pair = self._simulate_ratio_pair(traffic, steps)
+        if ratio_pair:
+            result["ratio_after"] = round(ratio_pair[1], 4)
         result["dry_run"] = {
             "steps": len(steps),
             "cost": total_cost,
@@ -1321,6 +1371,20 @@ class AutoBonusExchange(_PluginBase):
             # 没有发生兑换时余额不变，跳过/失败的记录也要给出变化后的值
             result["bonus_after"] = result["bonus_before"]
 
+            # 分享率优先用商店页上站点自己显示的值；页面解析不到才退回站点用户数据基线（每日快照）
+            page_ratio = bonus_info.get("user_ratio")
+            ratio_traffic = None if page_ratio else self._latest_site_traffic(site_url)
+            if page_ratio:
+                result["ratio_before"] = round(float(page_ratio), 4)
+                result["ratio_after"] = result["ratio_before"]
+                result["ratio_source"] = "站点页面"
+            elif ratio_traffic:
+                result["ratio_before"] = round(ratio_traffic["ratio"], 4)
+                result["ratio_after"] = result["ratio_before"]
+                result["ratio_source"] = "站点数据基线"
+                logger.info(f"{site_name} 商店页未解析到分享率，按 {ratio_traffic['updated_day']} "
+                            f"站点数据基线 {ratio_traffic['ratio']:.2f} 推演")
+
             # 检查魔力值是否足够
             if bonus_info.get("current_bonus", 0) <= self._keep_balance:
                 result["status"] = "skipped"
@@ -1348,7 +1412,6 @@ class AutoBonusExchange(_PluginBase):
             running_bonus = bonus_info.get("current_bonus", 0) or 0
             live_info = dict(bonus_info)
             delta_steps: List[dict] = []
-            ratio_traffic = None
             download_fail = 0
             stop_reason = ""
             max_steps = self._step_limit() if oscillate else len(exchange_plan)
@@ -1376,12 +1439,6 @@ class AutoBonusExchange(_PluginBase):
                 bonus_of_item = running_bonus
                 kind = self._item_kind(item)
                 is_unlock_step = oscillate and kind == "download"
-                if is_unlock_step and ratio_traffic is None:
-                    ratio_traffic = self._latest_site_traffic(site_url)
-                    if ratio_traffic:
-                        result["ratio_before"] = round(ratio_traffic["ratio"], 4)
-                        logger.info(f"{site_name} 分享率基线 {ratio_traffic['ratio']:.2f}"
-                                    f"（{ratio_traffic['updated_day']} 站点数据）")
                 if is_api_mode:
                     exchange_result = self._exchange_api_item(
                         req_utils=req_utils,
@@ -1436,6 +1493,10 @@ class AutoBonusExchange(_PluginBase):
                             break
                         live_info = refreshed
                         running_bonus = refreshed.get("current_bonus", 0) or running_bonus
+                        # 重抓的页面顺带刷新站点显示的分享率，中途停止也留有最新值
+                        refreshed_ratio = refreshed.get("user_ratio")
+                        if refreshed_ratio:
+                            result["ratio_after"] = round(float(refreshed_ratio), 4)
                         if self._split_by_kind(refreshed.get("available_items") or [])["upload"]:
                             download_fail = 0
                             result["note"] = f"兑换 {item.get('name')} 后上传量档位已解锁"
@@ -1469,15 +1530,23 @@ class AutoBonusExchange(_PluginBase):
             if oscillate and not stop_reason and len(result["exchanged"]) >= max_steps:
                 result["note"] = f"{self._step_limit_reason()}，剩余档位下次运行继续"
 
-            # 重新获取魔力值
-            res = req_utils.get_res(url=bonus_url)
-            if res and res.status_code == 200:
-                if is_api_mode:
-                    new_bonus_info = self._parse_api_bonus_page(req_utils, site_url, res.text)
-                else:
-                    new_bonus_info = adapter.parse_bonus_page(res.text)
-                if new_bonus_info:
-                    result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
+            # 只有商店页取不到分享率时才按成交增量推演，页面值本身是站点显示的实测值
+            if (ratio_traffic and delta_steps
+                    and result.get("ratio_source") != "站点页面"):
+                ratio_pair = self._simulate_ratio_pair(ratio_traffic, delta_steps)
+                if ratio_pair:
+                    result["ratio_after"] = round(ratio_pair[1], 4)
+                    result["ratio_predict"] = f"{ratio_pair[0]:.2f} → {ratio_pair[1]:.2f}"
+
+            # 收尾再抓一次商店页：魔力值和站点显示的分享率都从这页取，不额外请求用户中心
+            new_bonus_info, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                       bonus_url, adapter, save_debug=False)
+            if new_bonus_info:
+                result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
+                final_ratio = new_bonus_info.get("user_ratio")
+                if final_ratio:
+                    result["ratio_after"] = round(float(final_ratio), 4)
+                    result["ratio_source"] = "站点页面"
 
             self._finish_site_status(result)
 
@@ -1782,6 +1851,28 @@ class AutoBonusExchange(_PluginBase):
         line = re.sub(r"\s+", " ", str(value or "").split("\n", 1)[0]).strip()
         return f"{line[:limit]}…" if len(line) > limit else line
 
+    def _ratio_text(self, result: dict) -> str:
+        """
+        详情页与通知里的分享率一行：取不到基线就返回空串不显示。
+
+        分享率默认直接取魔力商店页上站点显示的值（首抓与收尾各一次，不额外请求）；
+        只有商店页解析不到时，才退回站点用户数据基线加本轮成交增量推演，
+        这种情况下行首标成「分享率(推演)」，与站点实测值区分开。
+        """
+        before = result.get("ratio_before")
+        after = result.get("ratio_after")
+        if not before or not after:
+            predict = self._one_line(result.get("ratio_predict"), 40)
+            return f"分享率 {predict}" if predict else ""
+        label = ("分享率" if result.get("ratio_source") in (None, "站点页面")
+                 else "分享率(推演)")
+        if abs(float(after) - float(before)) < 0.005:
+            return f"{label} {float(before):.2f}（未变动）"
+        delta = float(after) - float(before)
+        arrow = "↑" if delta > 0 else "↓"
+        return (f"{label} {float(before):.2f} → {float(after):.2f}"
+                f"（{arrow}{abs(delta):.2f}）")
+
     @classmethod
     def _is_benign_stop(cls, error: Any) -> bool:
         """判断未产生兑换的原因是否属于「按设置/站点限制没花钱」，而不是插件出错。"""
@@ -1872,9 +1963,9 @@ class AutoBonusExchange(_PluginBase):
                 note = self._one_line(site_result.get("note"), 80)
                 if note:
                     line += f"；{note}"
-                predict = self._one_line(site_result.get("ratio_predict"), 40)
-                if predict:
-                    line += f"；分享率 {predict}"
+                ratio_text = self._ratio_text(site_result)
+                if ratio_text and "未变动" not in ratio_text:
+                    line += f"；{ratio_text}"
                 exchanged_lines.append(line)
             elif status == "failed":
                 reason = self._one_line(site_result.get("error") or "未知原因", 100)
