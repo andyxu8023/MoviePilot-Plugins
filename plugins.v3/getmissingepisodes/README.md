@@ -5,11 +5,11 @@
 | 项目 | 值 |
 | --- | --- |
 | 插件 ID | `GetMissingEpisodes` |
-| 插件目录 | `plugins.v2/getmissingepisodes` |
+| 插件目录 | `plugins.v3/getmissingepisodes` |
 | 本文档对应版本 | `3.2.1` |
-| 适用 MoviePilot | V3 系列（本仓库以 `plugins.v2` 目录发布） |
+| 适用 MoviePilot | V3 系列 |
 | 权限等级 | 2（需要登录态，会写订阅） |
-| 上游作者 | 左岸（本仓库这份在其基础上做了本地增强） |
+| 上游作者 | 左岸 |
 
 > 目录
 >
