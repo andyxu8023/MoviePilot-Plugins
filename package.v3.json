@@ -5,7 +5,7 @@
     "labels": "订阅",
     "version": "3.2.2",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/EpisodeNoExist.png",
-    "author": "boeto，左岸",
+    "author": "左岸",
     "level": 2,
     "system_version": ">=3.0.1",
     "history": {
