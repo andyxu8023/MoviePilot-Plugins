@@ -56,7 +56,7 @@
 
 ## 界面说明
 
-![顶部栏与统计卡](images/01-topbar-stats.png)
+![顶部栏与统计卡](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/01-topbar-stats.png)
 
 **顶部栏**
 
@@ -71,7 +71,7 @@
 
 **剧集卡片**
 
-![常规剧集卡片](images/02-card.png)
+![常规剧集卡片](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/02-card.png)
 
 卡片从上到下：海报、剧名（点击跳 TMDB 页面）、状态徽章（全部存在 / 存在缺失 / 已加订阅 / 已删除 / 追新中 / 已跳过）、剧集状态（TMDB 的播出中、已完结、已取消…）、开播年份与评分、最后播出日期、本轮检查时间；有忽略季时再补一行「已忽略季」。归档卡片会多出「删除时间」「删除前存在」「追新结果」三行。
 
@@ -86,17 +86,17 @@
 | 继续追新 / 停止追新 | 已删除卡片 | 打开后每轮扫描会检查这部剧的新季 |
 | 缺失处理：全局 ▾ | 所有卡片 | 给这一部剧单独指定缺失处理方式，选「跟随全局」即取消单独设置 |
 
-![单剧缺失处理菜单](images/05-action-menu.png)
+![单剧缺失处理菜单](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/05-action-menu.png)
 
 手机端是同一套界面，卡片单列排布：
 
-![手机端卡片](images/07-mobile-cards.png)
+![手机端卡片](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/07-mobile-cards.png)
 
 ---
 
 ## 配置项详解
 
-![设置弹窗](images/06-settings.png)
+![设置弹窗](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/06-settings.png)
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
@@ -139,7 +139,7 @@
 
 在媒体服务器里删掉一部剧之后，插件下一轮扫描发现它不见了，会先向媒体服务器复核该条目确实已消失，然后把它转入**已删除**留档，而不是直接丢掉记录。
 
-![已删除归档卡片](images/04-deleted-card.png)
+![已删除归档卡片](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/04-deleted-card.png)
 
 归档记录保留：剧名、年份、TMDB ID、海报与评分、删除时间、最后一次在库的检查时间，以及最关键的**删除前存在的季与集快照**和此前的忽略季。
 
@@ -234,10 +234,3 @@
 | `/toggle_skip_history` | GET | 切换跳过 |
 | `/toggle_follow_history` | GET | 切换已删除剧集的继续追新 |
 | `/set_action_history` | GET | 设置单剧缺失处理方式，空值表示跟随全局 |
-
----
-
-## 说明
-
-- 本文档描述的是 **3.2.1** 的行为；仓库里 `plugins.v2/getmissingepisodes/__init__.py` 目前仍是旧版本代码，尚未同步本次的「已删除留档 / 继续追新 / 单剧缺失处理」等改动，需要一并更新代码时再提。
-- 界面截图由插件真实前端组件、真实 Vuetify 样式与本机真实看板数据渲染生成，未使用演示数据；截图里的剧名与数量是本机媒体库的实际情况。
