@@ -10,6 +10,7 @@ import re
 import time
 import traceback
 from datetime import datetime, timedelta
+from html import escape as _html_escape
 from html import unescape as _html_unescape
 from multiprocessing.dummy import Pool as ThreadPool
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,7 +42,7 @@ class AutoBonusExchange(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.1.5"
+    plugin_version = "2.1.6"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -657,10 +658,58 @@ class AutoBonusExchange(_PluginBase):
                      f"跳过 {summary['skipped']} · 共 {summary['sites']} 个站点")
         return " · ".join(parts)
 
-    def _build_records_card(self, title: str, records: dict) -> dict:
-        """把一轮兑换记录渲染成卡片：副标题是汇总，站点按状态排序，明细统一行式。"""
-        results = records.get("results") or {}
-        summary = self._aggregate(results)
+    # 兑换表格列定义：标题、列宽、对齐方式，顺序与下面的 _cell_* 严格对应
+    _TABLE_COLUMNS = (
+        ("站点", "14%", "start"),
+        ("状态", "7%", "start"),
+        ("魔力值", "19%", "end"),
+        ("分享率", "14%", "end"),
+        ("兑换档位", "23%", "start"),
+        ("说明", "23%", "start"),
+    )
+    # 单元格分隔线单独成常量，最后一行要去掉它，避免与表格外框叠成双线
+    _TD_BORDER = "border-bottom:thin solid rgba(var(--v-theme-on-surface),.08)"
+    # 单元格公共样式：内容顶对齐，长档位名按列宽自动折行，分隔线用主题前景色保证明暗可见
+    _TD_STYLE = f"padding:7px 12px;vertical-align:top;word-break:break-word;{_TD_BORDER}"
+    # 次要文字统一用主题前景色加透明度，明暗自适应，不写死灰值
+    _MUTED_STYLE = "color:rgba(var(--v-theme-on-surface),.6)"
+    _SMALL_STYLE = "font-size:.75rem"
+    # 状态徽章：HTML 片段里用不了 VChip 组件，按内联样式做同款胶囊，颜色仍取主题变量
+    _BADGE_STYLE = ("display:inline-block;padding:1px 9px;border-radius:9999px;"
+                    "font-size:.72rem;line-height:1.6;font-weight:500;white-space:nowrap")
+    _BADGE_COLOR = {
+        "success": "background:rgb(var(--v-theme-success));color:#fff",
+        "failed": "background:rgb(var(--v-theme-error));color:#fff",
+        "skipped": "background:rgb(var(--v-theme-warning));color:#212121",
+        "unknown": "background:rgba(var(--v-theme-on-surface),.12);"
+                   "color:rgba(var(--v-theme-on-surface),.7)",
+    }
+
+    # 分享率一行形如「分享率(推演) 5.03 → 5.08（↑0.05）」，拆出标签、数值与尾部变化
+    _RATIO_LINE_RE = re.compile(
+        r"^(?P<label>分享率(?:\([^)]*\))?)\s+(?P<value>.*?)(?P<tail>（[^）]*）)?$")
+
+    @classmethod
+    def _split_ratio(cls, text: str) -> Tuple[str, str, str]:
+        """
+        拆分享率一行：表头已说明这一列是分享率，所以主行只留数值，
+        「未变动」「↑0.05」这类尾注与「(推演)」标注降到小字，避免长串在窄列里折行。
+        """
+        if not text:
+            return "", "", ""
+        matched = cls._RATIO_LINE_RE.match(text.strip())
+        if not matched:
+            return text, "", ""
+        tag = matched.group("label").replace("分享率", "", 1)
+        value = matched.group("value").strip()
+        tail = (matched.group("tail") or "").strip("（）")
+        return value or text, tag, tail
+
+    def _site_rows(self, results: dict) -> List[dict]:
+        """
+        把一轮兑换结果规整成行数据：宽屏表格与窄屏列表共用同一份口径，
+        站点按状态与消耗排序，同档位多笔在这里合并，两种渲染不再各算各的。
+        """
 
         def _sort_key(pair) -> Tuple[int, float]:
             """成功、失败、跳过依次排列，同状态内按消耗从大到小。"""
@@ -670,81 +719,236 @@ class AutoBonusExchange(_PluginBase):
                        for row in self._group_exchanged(result.get("exchanged") or []))
             return self._STATUS_ORDER.get(status, 3), -cost
 
-        items = []
-        for site_name, result in sorted(results.items(), key=_sort_key):
+        def _bonus(value) -> str:
+            """未取到魔力值时显示占位符，避免看起来像被清零。"""
+            return self._fmt_num(value) if value else "—"
+
+        rows: List[dict] = []
+        for site_name, result in sorted((results or {}).items(), key=_sort_key):
             status = str(result.get("status") or "unknown")
-            exchanged = result.get("exchanged") or []
-            rows = self._group_exchanged(exchanged)
-            site_cost = sum(row["cost"] * row["count"] for row in rows)
-
-            def _bonus(value) -> str:
-                """未取到魔力值时显示占位符，避免看起来像被清零。"""
-                return self._fmt_num(value) if value else "—"
-
+            groups = self._group_exchanged(result.get("exchanged") or [])
+            site_cost = sum(row["cost"] * row["count"] for row in groups)
             before, after = _bonus(result.get("bonus_before")), _bonus(result.get("bonus_after"))
-            if before == after:
-                head = f"魔力值 {before}（未变动）" if before != "—" else "未取到魔力值"
+            found = before != "—"
+            changed = before != after
+
+            if not found:
+                bonus_line = "未取到魔力值"
+            elif not changed:
+                bonus_line = f"魔力值 {before}（未变动）"
             else:
-                head = (f"魔力值 {before} → {after}"
-                        f"（-{self._fmt_num(site_cost)}）")
+                bonus_line = f"魔力值 {before} → {after}（-{self._fmt_num(site_cost)}）"
 
-            lines = [head]
+            items = []
+            for group in groups:
+                # 单笔不带 ×1，多笔合并成一行，窄屏不被重复条目刷屏
+                name = group["name"]
+                label = name if group["count"] == 1 else f"{name} ×{group['count']}"
+                items.append({"label": label, "cost": group["cost"]})
+
             ratio_text = self._ratio_text(result)
-            if ratio_text:
-                lines.append(ratio_text)
-            for row in rows:
-                # 同档位多笔合并成一行，移动端不被重复条目刷屏；单笔不带 ×1
-                label = row["name"] if row["count"] == 1 else f"{row['name']} ×{row['count']}"
-                lines.append(f"{label} · 单价 {self._fmt_num(row['cost'])}")
+            ratio_value, ratio_tag, ratio_delta = self._split_ratio(ratio_text)
 
+            # 每条说明存三份：表格用的正文、配色语气、窄屏整句（带「原因：」这类前缀）
+            notes: List[Tuple[str, str, str]] = []
             note = self._one_line(result.get("note"), 90)
             error = self._one_line(result.get("error"), 90)
             if error:
-                lines.append(f"{'失败' if status == 'failed' else '原因'}：{error}")
+                prefix = "失败" if status == "failed" else "原因"
+                tone = "error" if status == "failed" else "muted"
+                notes.append((error, tone, f"{prefix}：{error}"))
             if note:
-                lines.append(f"说明：{note}")
+                notes.append((note, "muted", f"说明：{note}"))
             elif status == "success":
                 missed = [a for a in (result.get("attempts") or []) if not a.get("success")]
                 if missed:
                     detail = self._one_line(missed[0].get("detail"), 90)
-                    lines.append(f"未落地：{detail or missed[0].get('item') or '兑换未生效'}")
+                    fallback = detail or missed[0].get("item") or "兑换未生效"
+                    notes.append((fallback, "muted", f"未落地：{fallback}"))
             if result.get("dry_run"):
                 # 演练模式的逐笔推演跟在原因行后面，第一行已作为原因显示，这里只补步骤行
                 for extra in str(result.get("error") or "").split("\n")[1:]:
                     if extra.strip():
-                        lines.append(extra.strip())
+                        notes.append((extra.strip(), "muted", extra.strip()))
 
-            content = [{
-                # 站点名与状态徽章同行，徽章跟在名字后面
-                "component": "VListItemTitle",
-                "props": {"class": "text-break", "style": self._TITLE_STYLE},
-                "content": [
-                    {"component": "span", "text": site_name},
-                    {
-                        "component": "VChip",
-                        "props": {
-                            "color": self._STATUS_COLOR.get(status, "grey"),
-                            "size": "x-small",
-                            "variant": "flat",
-                        },
-                        "text": self._STATUS_TEXT.get(status, "未知"),
-                    },
-                ]
-            }]
-            for index, text in enumerate(lines):
-                # 首行保持正常字号，档位与备注等明细降为灰色小字
-                css = "text-break" if index == 0 else "text-break text-caption text-medium-emphasis"
-                content.append({
-                    "component": "VListItemSubtitle",
-                    "props": {"class": css, "style": self._WRAP_STYLE},
-                    "text": text,
-                })
+            # 窄屏行式渲染要的整句文本，与表格列同源
+            lines = [bonus_line]
+            if ratio_text:
+                lines.append(ratio_text)
+            for item in items:
+                lines.append(f"{item['label']} · 单价 {self._fmt_num(item['cost'])}")
+            lines.extend(full for _, _, full in notes)
 
-            items.append({
-                "component": "VListItem",
-                "props": {"class": "py-2"},
-                "content": content,
+            rows.append({
+                "site": site_name,
+                "status": status,
+                "status_text": self._STATUS_TEXT.get(status, "未知"),
+                "dry_run": bool(result.get("dry_run")),
+                "bonus_found": found,
+                "bonus_changed": changed,
+                "bonus_before": before,
+                "bonus_after": after,
+                "cost": site_cost,
+                "ratio": ratio_value,
+                "ratio_tag": ratio_tag,
+                "ratio_delta": ratio_delta,
+                "items": items,
+                "notes": notes,
+                "lines": lines,
             })
+        return rows
+
+    def _cell_open(self, index: int, extra: str = "") -> str:
+        """生成 td 起始标签：数值列右对齐并用等宽数字，纵向比大小不错位。"""
+        align = self._TABLE_COLUMNS[index][2]
+        style = self._TD_STYLE
+        if align == "end":
+            style = f"{style};text-align:end;font-variant-numeric:tabular-nums"
+        return f'<td style="{style};{extra}">'
+
+    def _cell_site(self, row: dict) -> str:
+        """站点列：名字长短不一，加粗并按列宽折行。"""
+        return f'{self._cell_open(0, "font-weight:500")}{_html_escape(row["site"])}</td>'
+
+    def _cell_status(self, row: dict) -> str:
+        """状态列：胶囊徽章，演练模式在徽章下补一行小字。"""
+        color = self._BADGE_COLOR.get(row["status"], self._BADGE_COLOR["unknown"])
+        badge = (f'<span style="{self._BADGE_STYLE};{color}">'
+                 f'{_html_escape(row["status_text"])}</span>')
+        if row["dry_run"]:
+            badge += (f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE};margin-top:2px">'
+                      f'演练</div>')
+        return f"{self._cell_open(1)}{badge}</td>"
+
+    def _cell_bonus(self, row: dict) -> str:
+        """魔力值列：主值给前后变化，消耗或未变动作小字补充。"""
+        if not row["bonus_found"]:
+            return (f'{self._cell_open(2)}<span style="{self._MUTED_STYLE}">'
+                    f'未取到</span></td>')
+        if row["bonus_changed"]:
+            main = f'{row["bonus_before"]} → {row["bonus_after"]}'
+            sub = f'-{self._fmt_num(row["cost"])}'
+        else:
+            main = row["bonus_before"]
+            sub = "未变动"
+        return (f'{self._cell_open(2)}<div>{_html_escape(main)}</div>'
+                f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                f'{_html_escape(sub)}</div></td>')
+
+    def _cell_ratio(self, row: dict) -> str:
+        """分享率列：主行只给数值，涨跌或未变动与「推演」标注降到小字。"""
+        if not row["ratio"]:
+            return f'{self._cell_open(3)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = f'<div>{_html_escape(row["ratio"])}</div>'
+        tail = " ".join(part for part in (row["ratio_delta"], row["ratio_tag"]) if part)
+        if tail:
+            cells += (f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                      f'{_html_escape(tail)}</div>')
+        return f"{self._cell_open(3)}{cells}</td>"
+
+    def _cell_items(self, row: dict) -> str:
+        """兑换档位列：一行一个档位，单价作尾注小字。"""
+        if not row["items"]:
+            return f'{self._cell_open(4)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = []
+        for item in row["items"]:
+            price = (f'<span style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                     f' · 单价 {self._fmt_num(item["cost"])}</span>')
+            cells.append(f'<div>{_html_escape(item["label"])}{price}</div>')
+        return f"{self._cell_open(4)}{''.join(cells)}</td>"
+
+    def _cell_notes(self, row: dict) -> str:
+        """说明列：列头已表明是说明，所以不再带「原因：」「说明：」前缀，失败用主题错误色。"""
+        if not row["notes"]:
+            return f'{self._cell_open(5)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = []
+        for text, tone, _ in row["notes"]:
+            color = ("color:rgb(var(--v-theme-error))" if tone == "error"
+                     else self._MUTED_STYLE)
+            cells.append(f'<div style="{self._SMALL_STYLE};{color}">'
+                         f'{_html_escape(text)}</div>')
+        return f"{self._cell_open(5)}{''.join(cells)}</td>"
+
+    @staticmethod
+    def _row_shade(index: int) -> str:
+        """偶数行加一层极淡底色，横向扫读不错行。"""
+        return "background:rgba(var(--v-theme-on-surface),.035)" if index % 2 else ""
+
+    def _records_table(self, rows: List[dict]) -> str:
+        """
+        宽屏兑换表格。
+
+        走 PageRender 的 html 分支由浏览器解析整段表格标记：逐层用组件搭 <tr>/<td>
+        会在每个插槽里插入空白文本节点，落在表格结构上容易错行，浏览器解析则最稳。
+        """
+        if not rows:
+            return (f'<div style="padding:12px;{self._MUTED_STYLE}">'
+                    f'本轮没有站点处理结果</div>')
+        heads = []
+        for title, width, align in self._TABLE_COLUMNS:
+            heads.append(
+                f'<th style="width:{width};text-align:{align};padding:7px 12px;'
+                f'font-weight:500;white-space:nowrap;'
+                f'border-bottom:thin solid rgba(var(--v-theme-on-surface),.22)">'
+                f'{_html_escape(title)}</th>'
+            )
+        bodies = []
+        for index, row in enumerate(rows):
+            bodies.append(
+                f'<tr style="{self._row_shade(index)}">'
+                f'{self._cell_site(row)}{self._cell_status(row)}{self._cell_bonus(row)}'
+                f'{self._cell_ratio(row)}{self._cell_items(row)}{self._cell_notes(row)}'
+                f'</tr>'
+            )
+        # 最后一行的分隔线贴着外框，去掉才不留双线
+        bodies[-1] = bodies[-1].replace(f";{self._TD_BORDER}", "")
+        return ('<div class="v-table v-table--density-compact v-table--hover"'
+                ' style="border:thin solid rgba(var(--v-border-color),var(--v-border-opacity));'
+                'border-radius:8px;overflow:hidden;color:rgb(var(--v-theme-on-surface))">'
+                '<div class="v-table__wrapper">'
+                '<table style="table-layout:fixed;border-collapse:collapse">'
+                f'<thead><tr>{"".join(heads)}</tr></thead>'
+                f'<tbody>{"".join(bodies)}</tbody>'
+                '</table></div></div>')
+
+    def _records_list_item(self, row: dict) -> dict:
+        """窄屏按站点成组展示：站点名与徽章同行，明细与说明降为小字。"""
+        content = [{
+            # 站点名与状态徽章同行，徽章跟在名字后面
+            "component": "VListItemTitle",
+            "props": {"class": "text-break", "style": self._TITLE_STYLE},
+            "content": [
+                {"component": "span", "text": row["site"]},
+                {
+                    "component": "VChip",
+                    "props": {
+                        "color": self._STATUS_COLOR.get(row["status"], "grey"),
+                        "size": "x-small",
+                        "variant": "flat",
+                    },
+                    "text": row["status_text"],
+                },
+            ]
+        }]
+        for index, text in enumerate(row["lines"]):
+            # 首行保持正常字号，档位与备注等明细降为灰色小字
+            css = "text-break" if index == 0 else "text-break text-caption text-medium-emphasis"
+            content.append({
+                "component": "VListItemSubtitle",
+                "props": {"class": css, "style": self._WRAP_STYLE},
+                "text": text,
+            })
+        return {
+            "component": "VListItem",
+            "props": {"class": "py-2"},
+            "content": content,
+        }
+
+    def _build_records_card(self, title: str, records: dict) -> dict:
+        """兑换记录卡片：汇总行在前，宽屏用表格，窄屏回退成按站点的行式列表。"""
+        results = records.get("results") or {}
+        summary = self._aggregate(results)
+        rows = self._site_rows(results)
 
         return {
             "component": "VCard",
@@ -760,9 +964,16 @@ class AutoBonusExchange(_PluginBase):
                     "text": self._build_summary_subtitle(summary),
                 },
                 {
+                    # ≥960px 显示表格；列宽固定，档位与说明在单元格内折行
+                    "component": "div",
+                    "props": {"class": "d-none d-md-block px-4 pb-2"},
+                    "html": self._records_table(rows),
+                },
+                {
+                    # 窄屏不横向滚动表格，仍按站点分组，保证移动端可读
                     "component": "VList",
-                    "props": {"density": "compact"},
-                    "content": items,
+                    "props": {"density": "compact", "class": "d-md-none"},
+                    "content": [self._records_list_item(row) for row in rows],
                 },
             ]
         }
