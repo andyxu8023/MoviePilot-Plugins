@@ -1,0 +1,159 @@
+
+.gme-root[data-v-65b51c87] {
+  width: 100%;
+}
+.gme-header[data-v-65b51c87] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.gme-header__title[data-v-65b51c87] {
+  display: flex;
+  align-items: center;
+}
+.gme-header__actions[data-v-65b51c87] {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.gme-muted[data-v-65b51c87] {
+  opacity: 0.7;
+}
+.gme-stats[data-v-65b51c87] {
+  margin-bottom: 8px;
+}
+.gme-stat[data-v-65b51c87] {
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.gme-stat[data-v-65b51c87]:hover {
+  transform: translateY(-1px);
+}
+.gme-stat--active[data-v-65b51c87] {
+  box-shadow: 0 0 0 2px rgba(var(--v-theme-primary), 0.45);
+}
+.gme-toolbar[data-v-65b51c87] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.gme-toolbar__search[data-v-65b51c87] {
+  max-width: 320px;
+}
+.gme-empty[data-v-65b51c87] {
+  text-align: center;
+  padding: 40px 12px;
+}
+.gme-card__body[data-v-65b51c87] {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  flex: 1 1 auto;
+}
+.gme-card__poster[data-v-65b51c87] {
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.gme-card__poster-fallback[data-v-65b51c87] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  opacity: 0.4;
+}
+.gme-card__info[data-v-65b51c87] {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.gme-card__title[data-v-65b51c87] {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  word-break: break-word;
+  line-height: 1.25;
+  margin-bottom: 6px;
+}
+.gme-card__title[data-v-65b51c87]:hover {
+  color: rgb(var(--v-theme-primary));
+}
+.gme-card__seasons[data-v-65b51c87] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.gme-card__actions[data-v-65b51c87] {
+  flex-wrap: nowrap;
+}
+.gme-card__body[data-v-65b51c87] {
+  color: #fff;
+}
+.gme-card__body .gme-muted[data-v-65b51c87] {
+  opacity: 1;
+  color: #fff;
+}
+/* 剧集卡片固定为普通不透明卡面，不跟随系统玻璃效果 */
+html body .gme-root .gme-card.v-card {
+  background-color: rgb(var(--v-theme-surface)) !important;
+  background-image: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* 卡内按钮与描边徽章：底色与卡面同族（不透明、不透背景图），
+   不再用 #1f2937 —— 与卡面不同色再叠 tonal 色罩会糊成脏灰紫 */
+html body .gme-root .gme-card .v-btn[data-v-65b51c87],
+html body .gme-root .gme-card .v-chip--variant-outlined[data-v-65b51c87] {
+  background-color: rgb(var(--v-theme-surface)) !important;
+}
+/* src 里是 :deep(.v-btn__underlay)，编译后 scope 落在 .gme-card 上 */
+html body .gme-root .gme-card[data-v-65b51c87] .v-btn__underlay {
+  opacity: 0 !important;
+}
+/* 按钮条与卡面同色，靠 1px 发丝线分隔 */
+html body .gme-root .gme-card .gme-card__actions[data-v-65b51c87],
+html body .gme-root .gme-card .gme-card__action-extra[data-v-65b51c87] {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+html body .gme-root .gme-card .gme-card__actions .v-btn + .v-btn[data-v-65b51c87] {
+  border-inline-start: 1px solid rgba(255, 255, 255, 0.1);
+}
+/* 撤掉玻璃主题给 chip / btn 叠的毛玻璃与高光，保留 Vuetify 实色底色 */
+html body .gme-root .gme-card .v-chip[data-v-65b51c87],
+html body .gme-root .gme-card .v-btn[data-v-65b51c87] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background-image: none !important;
+}
+/* 按键底色淡染：不透明卡面底色上叠自身语义色 15%（按钮仍是不透明实底）。
+   不用 color-mix（实测会算成同一中性值）；特异性需高于上面那条 none !important。 */
+html body .gme-root .gme-card .gme-card__actions .v-btn.text-error[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-error), .15), rgba(var(--v-theme-error), .15)) !important;
+}
+html body .gme-root .gme-card .gme-card__actions .v-btn.text-success[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-success), .15), rgba(var(--v-theme-success), .15)) !important;
+}
+html body .gme-root .gme-card .gme-card__actions .v-btn.text-primary[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-primary), .15), rgba(var(--v-theme-primary), .15)) !important;
+}
+html body .gme-root .gme-card .gme-card__actions .v-btn.text-warning[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-warning), .15), rgba(var(--v-theme-warning), .15)) !important;
+}
+html body .gme-root .gme-card .gme-card__actions .v-btn.text-info[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-info), .15), rgba(var(--v-theme-info), .15)) !important;
+}
+html body .gme-root .gme-card .gme-card__action-extra.text-primary[data-v-65b51c87] {
+  background-image: linear-gradient(rgba(var(--v-theme-primary), .1), rgba(var(--v-theme-primary), .1)) !important;
+}
+/* 玻璃主题会把 flat chip 的 bg-<色> 压成 34% 透明，这里按颜色还原实色 */
+html body .gme-root .gme-card .v-chip.bg-success[data-v-65b51c87] { background-color: rgb(var(--v-theme-success)) !important; }
+html body .gme-root .gme-card .v-chip.bg-info[data-v-65b51c87] { background-color: rgb(var(--v-theme-info)) !important; }
+html body .gme-root .gme-card .v-chip.bg-warning[data-v-65b51c87] { background-color: rgb(var(--v-theme-warning)) !important; }
+html body .gme-root .gme-card .v-chip.bg-error[data-v-65b51c87] { background-color: rgb(var(--v-theme-error)) !important; }
+html body .gme-root .gme-card .v-chip.bg-secondary[data-v-65b51c87] { background-color: rgb(var(--v-theme-secondary)) !important; }
+html body .gme-root .gme-card .v-chip.bg-primary[data-v-65b51c87] { background-color: rgb(var(--v-theme-primary)) !important; }
