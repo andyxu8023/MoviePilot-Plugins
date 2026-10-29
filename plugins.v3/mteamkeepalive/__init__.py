@@ -31,7 +31,7 @@ class MTeamKeepAlive(_PluginBase):
     # 插件描述
     plugin_desc = "通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/m-team.svg"
+    plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/m-team.png"
     # 插件版本
     plugin_version = "1.0.5"
     # 插件标签
