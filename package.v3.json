@@ -77,7 +77,7 @@
     "description": "馒头站点不支持自动模拟登录，此插件通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。",
     "labels": "站点",
     "version": "1.0.5",
-    "icon": "https://static.m-team.cc/favicon.ico",
+    "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/m-team.png",
     "author": "左岸",
     "level": 1,
     "history": {
