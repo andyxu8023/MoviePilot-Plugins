@@ -5,10 +5,11 @@ NexusPHP 魔力值自动兑换插件
 支持自适应限速、多站并发、单站串行、安全熔断与任务统计。
 """
 
+import json
 import os
 import re
+import threading
 import time
-import traceback
 from datetime import datetime, timedelta
 from html import escape as _html_escape
 from html import unescape as _html_unescape
@@ -36,13 +37,13 @@ class AutoBonusExchange(_PluginBase):
     """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
 
     # 插件名称
-    plugin_name = "魔力值自动兑换"
+    plugin_name = "魔力值自动兑换💻"
     # 插件描述
     plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
     # 插件版本
-    plugin_version = "2.1.7"
+    plugin_version = "2.1.9"
     # 插件作者
     plugin_author = "左岸"
     # 作者主页
@@ -78,8 +79,10 @@ class AutoBonusExchange(_PluginBase):
     _HARD_MAX_STEPS = 100
 
     # 运行时状态
-    _today_data: dict = {}
-    _circuit_breaker: dict = {}
+    # 熔断计数按轮次维护：exchange_bonus 每轮开始都会重建实例字典，这里的空字典只作兜底
+    _circuit_breaker: Dict[str, int] = {}
+    # 多站点并发兑换时保护熔断计数的读写
+    _breaker_lock = threading.RLock()
     _force_run: bool = False
     # 演练模式：存在 _DRY_RUN_FLAG 文件时只输出计划、不提交兑换
     _dry_run: bool = False
@@ -96,29 +99,42 @@ class AutoBonusExchange(_PluginBase):
 
         # 配置
         if config:
-            self._enabled = config.get("enabled", False)
-            self._cron = config.get("cron", "") or "0 0 1 * *"
-            self._onlyonce = config.get("onlyonce", False)
-            self._notify = config.get("notify", False)
-            self._queue_cnt = config.get("queue_cnt", 3)
-            self._bonus_sites = config.get("bonus_sites", [])
-            self._strategy = config.get("strategy", "fixed")
-            self._exchange_type = config.get("exchange_type", "upload")
-            self._keep_balance = float(config.get("keep_balance", 0))
-            self._max_retry = int(config.get("max_retry", 3))
-            self._circuit_break_threshold = int(config.get("circuit_break_threshold", 5))
-            self._rate_limit_ms = int(config.get("rate_limit_ms", 1000))
-            self._force_run = config.get("force_run", False)
+            self._enabled = bool(config.get("enabled", False))
+            self._cron = str(config.get("cron", "") or "") or "0 0 1 * *"
+            self._onlyonce = bool(config.get("onlyonce", False))
+            self._notify = bool(config.get("notify", False))
+            # 并发数至少 1：ThreadPool(0) 会直接抛异常，让整轮兑换静默失败
+            self._queue_cnt = max(1, self._conf_int(config.get("queue_cnt"), 3, "并发站点数"))
+            # 站点列表必须是实例属性，否则多个插件实例共用同一个类级列表
+            self._bonus_sites = list(config.get("bonus_sites", []) or [])
+            self._strategy = str(config.get("strategy", "fixed") or "fixed")
+            self._exchange_type = str(config.get("exchange_type", "upload") or "upload")
+            self._keep_balance = self._conf_float(config.get("keep_balance"), 0.0, "保留魔力值")
+            self._max_retry = self._conf_int(config.get("max_retry"), 3, "单档重试次数")
+            self._circuit_break_threshold = self._conf_int(
+                config.get("circuit_break_threshold"), 5, "熔断失败阈值")
+            self._rate_limit_ms = self._conf_int(config.get("rate_limit_ms"), 1000, "兑换间隔毫秒")
+            self._force_run = bool(config.get("force_run", False))
             # 留空、0 或负数都按「不限制」处理
-            self._max_steps = max(0, int(config.get("max_steps") or 0))
-            self._max_download_to_unlock = max(0, int(config.get("max_download_to_unlock") or 0))
+            self._max_steps = max(0, self._conf_int(config.get("max_steps"), 0, "单站最多兑换次数"))
+            self._max_download_to_unlock = max(
+                0, self._conf_int(config.get("max_download_to_unlock"), 0, "解锁换下载次数"))
 
-            # 过滤掉已删除的站点
-            all_sites = [site.id for site in SiteOper().list_order_by_pri()]
-            self._bonus_sites = [site_id for site_id in all_sites if site_id in self._bonus_sites]
+            # 剔除已删除站点要留痕：这些 ID 会从配置里静默消失，没有日志的话
+            # 用户只会觉得「勾过的站不见了」
+            all_sites = {site.id for site in SiteOper().list_order_by_pri()}
+            dropped = [site_id for site_id in self._bonus_sites if site_id not in all_sites]
+            if dropped:
+                logger.warning(f"魔力值兑换配置中 {len(dropped)} 个站点已不在站点表，"
+                               f"本次移出勾选：{dropped}")
+            self._bonus_sites = [site_id for site_id in self._bonus_sites
+                                 if site_id in all_sites]
 
             # 保存配置
             self._save_config()
+
+        # 熔断计数字典在实例上重建，写入不再污染类级默认对象
+        self._circuit_breaker = {}
 
         # 启动任务
         if self._enabled or self._onlyonce:
@@ -167,10 +183,6 @@ class AutoBonusExchange(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         """返回插件远程命令列表。"""
-        return []
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        """返回插件 API 列表。"""
         return []
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -523,15 +535,45 @@ class AutoBonusExchange(_PluginBase):
         return text
 
     def _list_record_days(self, today: str) -> List[str]:
-        """逐日扫描最近记录，返回有站点处理结果的日期（新→旧）。"""
+        """
+        返回最近有站点处理结果的日期（新→旧）。
+
+        get_data() 不带 key 时一次取回本插件全部记录，代替原来按天循环的 31 次查询；
+        批量路径异常时退回逐日扫描，保证详情页只是慢一点而不是打不开。
+        """
         base = datetime.strptime(today, '%Y-%m-%d')
-        days = []
-        for offset in range(0, self._LOOKBACK_DAYS + 1):
-            day = (base - timedelta(days=offset)).strftime('%Y-%m-%d')
-            records = self.get_data(key=f"bonus_{day}")
-            if records and records.get("results"):
-                days.append(day)
-        return days
+        window = {(base - timedelta(days=offset)).strftime('%Y-%m-%d')
+                  for offset in range(0, self._LOOKBACK_DAYS + 1)}
+        days: List[str] = []
+        try:
+            for row in (self.get_data() or []):
+                key = getattr(row, "key", "") or ""
+                if not key.startswith("bonus_"):
+                    continue
+                day = key[len("bonus_"):]
+                if day not in window or day in days:
+                    continue
+                value = getattr(row, "value", None)
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        continue
+                if isinstance(value, dict) and value.get("results"):
+                    days.append(day)
+        except Exception as err:
+            logger.debug(f"批量读取兑换记录失败，改回逐日扫描：{str(err)}")
+            days = []
+            for day in sorted(window, reverse=True):
+                try:
+                    records = self.get_data(key=f"bonus_{day}")
+                except Exception as day_err:
+                    # 单日读取失败只跳过这天，不能让详情页整个报错
+                    logger.debug(f"{day} 记录读取失败，跳过：{str(day_err)}")
+                    continue
+                if records and records.get("results"):
+                    days.append(day)
+        return sorted(days, reverse=True)
 
     def _requested_view_day(self, today: str) -> Optional[str]:
         """读取日期按钮回写的查看日期；隔天自动失效，避免一直停在历史日期。"""
@@ -1040,6 +1082,13 @@ class AutoBonusExchange(_PluginBase):
         """执行魔力兑换任务。"""
         logger.info("开始执行 NexusPHP 魔力兑换任务...")
 
+        # 演练标记每轮重读：不重载插件也能切换演练，不再只在加载时读一次
+        self._dry_run = os.path.exists(_DRY_RUN_FLAG)
+        if self._dry_run:
+            logger.warning(f"检测到演练标记 {_DRY_RUN_FLAG}，本轮只输出兑换计划，不提交任何兑换")
+        # 熔断计数每轮清零：原实现只累加从不清空，站点会因历史失败被永久跳过
+        self._circuit_breaker = {}
+
         # 获取今日日期
         today = datetime.today().strftime('%Y-%m-%d')
 
@@ -1072,10 +1121,11 @@ class AutoBonusExchange(_PluginBase):
             "start_time": datetime.now().isoformat(),
         }
 
-        # 并发执行兑换
-        logger.info(f"开始兑换，共 {len(target_sites)} 个站点，并发数 {self._queue_cnt}")
+        # 并发执行兑换（并发数下限 1，配置留空时 ThreadPool(0) 会直接抛异常）
+        workers = min(len(target_sites), max(1, self._queue_cnt))
+        logger.info(f"开始兑换，共 {len(target_sites)} 个站点，并发数 {workers}")
 
-        with ThreadPool(min(len(target_sites), self._queue_cnt)) as p:
+        with ThreadPool(workers) as p:
             results = p.map(self._exchange_site, target_sites)
 
         # 汇总结果
@@ -1806,13 +1856,12 @@ class AutoBonusExchange(_PluginBase):
                     result["ratio_after"] = round(float(final_ratio), 4)
                     result["ratio_source"] = "站点页面"
 
-            self._finish_site_status(result)
+            self._finish_site_status(result, site_name)
 
         except Exception as e:
             result["status"] = "failed"
             result["error"] = str(e)
-            logger.error(f"{site_name} 兑换异常: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"{site_name} 兑换异常: {str(e)}", exc_info=True)
             self._record_circuit_break(site_name)
 
         return site_name, result
@@ -1949,7 +1998,6 @@ class AutoBonusExchange(_PluginBase):
                 return result
 
             # 解析JSON响应
-            import json
             try:
                 items_data = json.loads(res.text)
                 logger.info(f"API返回 {len(items_data)} 个项目")
@@ -1989,8 +2037,7 @@ class AutoBonusExchange(_PluginBase):
             logger.info(f"API解析到 {len(items)} 个兑换项目，当前魔力值: {result['current_bonus']}")
 
         except Exception as e:
-            logger.error(f"API解析魔力商店失败: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"API解析魔力商店失败: {str(e)}", exc_info=True)
             return None
 
         return result
@@ -2028,7 +2075,6 @@ class AutoBonusExchange(_PluginBase):
                 return {"success": False, "error": f"状态码: {res.status_code}"}
 
             # 解析JSON响应
-            import json
             try:
                 result_data = json.loads(res.text)
             except json.JSONDecodeError as e:
@@ -2048,14 +2094,21 @@ class AutoBonusExchange(_PluginBase):
             return {"success": False, "error": str(e)}
 
     def _check_circuit_breaker(self, site_name: str) -> bool:
-        """检查站点是否触发熔断。"""
-        fail_count = self._circuit_breaker.get(site_name, 0)
+        """检查站点本轮是否已触发熔断。"""
+        with self._breaker_lock:
+            fail_count = self._circuit_breaker.get(site_name, 0)
         return fail_count >= self._circuit_break_threshold
 
     def _record_circuit_break(self, site_name: str) -> None:
-        """记录站点熔断计数。"""
-        current = self._circuit_breaker.get(site_name, 0)
-        self._circuit_breaker[site_name] = current + 1
+        """累加站点本轮失败计数；多站点并发读写同一字典，必须持锁。"""
+        with self._breaker_lock:
+            current = self._circuit_breaker.get(site_name, 0)
+            self._circuit_breaker[site_name] = current + 1
+
+    def _clear_circuit_break(self, site_name: str) -> None:
+        """本轮兑到东西就清零，早先一两笔偶发失败不该累积成熔断。"""
+        with self._breaker_lock:
+            self._circuit_breaker.pop(site_name, None)
 
     # 把冗长的跳过原因压成短标签，同类站点合并成一行（按顺序优先匹配）
     # 「没花钱的原因是设置或站点限制，不是插件出错」这类短句：统一按跳过处理，不进【失败】
@@ -2087,10 +2140,46 @@ class AutoBonusExchange(_PluginBase):
     )
     # 单节内最多列出的站点数，超出折叠成「等 N 个站点」
     _MAX_LIST_SITES = 8
-    # 通知整体长度上限，防止极端配置把消息渠道刷屏
-    _MAX_NOTIFY_LEN = 1200
-    # 档位名形如 "10.0 GB上传量"，用于汇总一共兑换到多少流量
-    _TRAFFIC_RE = re.compile(r"([\d.]+)\s*(KB|MB|GB|TB)\s*(上传量|下载量)")
+    # 通知标题，正文预算要把标题占的字节一起扣掉
+    _NOTIFY_TITLE = "魔力值自动兑换完成"
+    # 企业微信群机器人 text 的 content 上限是 2048 UTF-8 字节，留安全余量防整条被拒
+    _MAX_NOTIFY_BYTES = 1950
+    # 通知明细行缩进：企微 text 不渲染 Markdown，只靠换行和空格分层级
+    _NOTIFY_INDENT = "  "
+    # 档位名形如 "10.0 GB上传量"；单位表要与 _TIER_SIZE_RE 保持一致，
+    # 否则站点写 GiB 时详情页和通知里的流量汇总会整块消失
+    _TRAFFIC_RE = re.compile(
+        r"([\d.]+)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*(上传量|下载量)", re.IGNORECASE)
+    # 单位显示名归一，避免 "gb" 与 "GB" 被拆成两组分别计数
+    _UNIT_LABELS = {"KB": "KB", "KIB": "KiB", "MB": "MB", "MIB": "MiB",
+                    "GB": "GB", "GIB": "GiB", "TB": "TB", "TIB": "TiB"}
+
+    @staticmethod
+    def _conf_int(value: Any, default: int, label: str) -> int:
+        """
+        配置项转整数：空值取默认，非法值回落默认并记日志。
+
+        直接在 init_plugin 里对空串或乱填的值 int() 会让插件初始化失败，
+        用户看到的只是插件「没跑」，很难联想到是某个配置项写坏了。
+        """
+        if value is None or value == "":
+            return default
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            logger.warning(f"魔力值兑换配置「{label}」不是有效整数（{value}），按 {default} 处理")
+            return default
+
+    @staticmethod
+    def _conf_float(value: Any, default: float, label: str) -> float:
+        """配置项转浮点：空值取默认，非法值回落默认并记日志，理由同 _conf_int。"""
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            logger.warning(f"魔力值兑换配置「{label}」不是有效数字（{value}），按 {default} 处理")
+            return default
 
     @staticmethod
     def _fmt_num(value: Any) -> str:
@@ -2137,7 +2226,7 @@ class AutoBonusExchange(_PluginBase):
         raw = str(error or "")
         return any(keyword in raw for keyword in cls._BENIGN_STOP_KEYWORDS)
 
-    def _finish_site_status(self, result: dict) -> None:
+    def _finish_site_status(self, result: dict, site_name: str = "") -> None:
         """
         收尾单站状态：兑到东西算成功，没兑到再区分是限制（跳过）还是出错（失败）。
 
@@ -2146,6 +2235,8 @@ class AutoBonusExchange(_PluginBase):
         """
         if result.get("exchanged"):
             result["status"] = "success"
+            if site_name:
+                self._clear_circuit_break(site_name)
         elif result.get("error") and not self._is_benign_stop(result.get("error")):
             result["status"] = "failed"
         else:
@@ -2165,7 +2256,9 @@ class AutoBonusExchange(_PluginBase):
         """按档位与单价聚合兑换明细，同档位多笔合并，消耗大的排前面。"""
         grouped: Dict[str, dict] = {}
         for item in exchanged or []:
-            name = str(item.get("gain") or item.get("item") or "未命名档位")
+            # 站点档位名常带多余空白，如「增加100.0 GB上传量 （将提高分享率）」，统一压紧凑
+            raw = str(item.get("gain") or item.get("item") or "未命名档位")
+            name = re.sub(r"\s+([（(])", r"\1", re.sub(r"\s+", " ", raw)).strip()
             try:
                 cost = float(item.get("cost") or 0)
             except (TypeError, ValueError):
@@ -2186,6 +2279,7 @@ class AutoBonusExchange(_PluginBase):
             if not matched:
                 return ""
             amount, unit, kind = matched.groups()
+            unit = cls._UNIT_LABELS.get(unit.upper(), unit.upper())
             try:
                 value = float(amount)
             except ValueError:
@@ -2196,89 +2290,126 @@ class AutoBonusExchange(_PluginBase):
             parts.append(f"{cls._fmt_num(totals[key])} {key[0]}{key[1]}")
         return "、".join(parts)
 
-    def _send_notification(self, today_data: dict) -> None:
-        """发送兑换结果通知：汇总行在前，已兑换逐站一行，跳过站点按原因合并。"""
+    def _notify_site_block(self, row: dict) -> str:
+        """
+        单站通知块：站名一行，余额与分享率、兑换档位、停止原因各一行。
+
+        原先所有字段挤在一行，靠「、，；」区分层级，折行后读不出主次；改成一个语义
+        一行后，折行只发生在同一层内部。企业微信群机器人固定按 msgtype=text 投递，
+        不渲染任何 Markdown，所以这里只用换行与空格缩进，星号会原样显示成噪声。
+        """
+        head = f"▎{row['site']}"
+        if row["dry_run"]:
+            head += "（演练）"
+        lines = [head]
+
+        facts = []
+        if not row["bonus_found"]:
+            facts.append("未取到魔力值")
+        elif row["bonus_changed"]:
+            facts.append(f"魔力 {row['bonus_before']} → {row['bonus_after']}"
+                         f"（-{self._fmt_num(row['cost'])}）")
+        else:
+            facts.append(f"魔力 {row['bonus_before']}（未变动）")
+        # 分享率只在真变化时占一行，「未变动」这类噪声留给详情页
+        if row["ratio"] and row["ratio_delta"] and "未变动" not in row["ratio_delta"]:
+            tail = " ".join(part for part in (row["ratio_delta"], row["ratio_tag"]) if part)
+            facts.append(f"分享率 {row['ratio']} {tail}")
+        lines.append(f"{self._NOTIFY_INDENT}· {' · '.join(facts)}")
+
+        if row["items"]:
+            lines.append(f"{self._NOTIFY_INDENT}· "
+                         + "、".join(item["label"] for item in row["items"]))
+        if row["notes"]:
+            # 通知只给第一条原因，更长的推演步骤与逐条说明在详情页看
+            lines.append(f"{self._NOTIFY_INDENT}↳ {row['notes'][0][0]}")
+        return "\n".join(lines)
+
+    def _build_notification_text(self, today_data: dict) -> str:
+        """拼通知正文：汇总两行在前，站点按状态分组，每个站点固定字段分行。"""
         results = today_data.get("results", {})
-        exchanged_lines: List[str] = []
-        failed_lines: List[str] = []
+        # 与详情页共用同一份行数据，通知与页面的笔数、消耗、档位口径不会再分叉
+        rows = self._site_rows(results)
+        stat = self._aggregate(results)
+
+        if stat["count"]:
+            head = f"兑换 {stat['count']} 笔 · 消耗 {self._fmt_num(stat['cost'])} 魔力值"
+            if stat["traffic"]:
+                head += f" · 获得 {stat['traffic']}"
+        else:
+            head = "本轮没有兑换动作"
+        summary = [head,
+                   f"成功 {stat['success']} · 失败 {stat['failed']} · "
+                   f"跳过 {stat['skipped']} · 共 {stat['sites']} 个站点"]
+
+        exchanged = [self._notify_site_block(row) for row in rows
+                     if row["status"] == "success"]
+        failed = [self._notify_site_block(row) for row in rows if row["status"] == "failed"]
+
+        # 跳过站点按原因合并成一行；这里用原始错误文本，短标签匹配不受明细截断影响
         skip_groups: Dict[str, List[str]] = {}
         skip_order: List[str] = []
-
         for site_name, site_result in results.items():
-            status = site_result.get("status")
-            exchanged = site_result.get("exchanged") or []
-
-            if status == "success":
-                rows = self._group_exchanged(exchanged)
-                site_cost = sum(row["cost"] * row["count"] for row in rows)
-                details = "、".join(
-                    f"{row['name']} ×{row['count']}" if row["count"] > 1 else row["name"]
-                    for row in rows
+            if site_result.get("status") in ("success", "failed"):
+                continue
+            label = self._skip_label(site_result.get("error"))
+            if label not in skip_groups:
+                skip_groups[label] = []
+                skip_order.append(label)
+            # 因预算/保留值限制的站点带上余额，其余只列站名，保证一行读完
+            if label in ("未达保留值", "可用魔力值不足", "余额低于最低档位"):
+                skip_groups[label].append(
+                    f"{site_name} {self._fmt_num(site_result.get('bonus_before'))}"
                 )
-                line = (f"{site_name}：{details}，消耗 {self._fmt_num(site_cost)}，"
-                        f"魔力值 {self._fmt_num(site_result.get('bonus_before'))} → "
-                        f"{self._fmt_num(site_result.get('bonus_after'))}")
-                note = self._one_line(site_result.get("note"), 80)
-                if note:
-                    line += f"；{note}"
-                ratio_text = self._ratio_text(site_result)
-                if ratio_text and "未变动" not in ratio_text:
-                    line += f"；{ratio_text}"
-                exchanged_lines.append(line)
-            elif status == "failed":
-                reason = self._one_line(site_result.get("error") or "未知原因", 100)
-                failed_lines.append(f"{site_name}：{reason}")
             else:
-                label = self._skip_label(site_result.get("error"))
-                if label not in skip_groups:
-                    skip_groups[label] = []
-                    skip_order.append(label)
-                # 因预算/保留值限制的站点带上余额，其余只列站名，保证一行读完
-                if label in ("未达保留值", "可用魔力值不足", "余额低于最低档位"):
-                    skip_groups[label].append(
-                        f"{site_name} {self._fmt_num(site_result.get('bonus_before'))}"
-                    )
-                else:
-                    skip_groups[label].append(site_name)
+                skip_groups[label].append(site_name)
 
-        handled = f"处理 {len(results)} 个站点"
-        stat = self._aggregate(results)
-        if stat["count"]:
-            summary = (f"兑换 {stat['count']} 笔，"
-                       f"消耗 {self._fmt_num(stat['cost'])} 魔力值")
-            if stat["traffic"]:
-                summary += f"，获得 {stat['traffic']}"
-            summary += f"（{handled}"
-            if stat["failed"]:
-                summary += f"，失败 {stat['failed']} 个站点"
-            summary += "）"
-        else:
-            summary = f"本轮没有兑换动作（{handled}）"
+        # 分组标题按站点数计，三类口径一致；站点块之间空一行，粗体站名不会被上一块尾行黏住
+        skip_lines = []
+        for label in skip_order:
+            names = skip_groups[label]
+            shown = "、".join(names[:self._MAX_LIST_SITES])
+            if len(names) > self._MAX_LIST_SITES:
+                shown += f" 等 {len(names)} 个站点"
+            skip_lines.append(f"· {label}：{shown}")
+        skip_total = sum(len(names) for names in skip_groups.values())
 
-        sections: List[List[str]] = [[summary]]
-        if exchanged_lines:
-            sections.append(["【已兑换】"] + exchanged_lines)
-        if failed_lines:
-            sections.append(["【失败】"] + failed_lines)
-        if skip_order:
-            section = ["【未兑换】"]
-            for label in skip_order:
-                names = skip_groups[label]
-                shown = "、".join(names[:self._MAX_LIST_SITES])
-                if len(names) > self._MAX_LIST_SITES:
-                    shown += f" 等 {len(names)} 个站点"
-                section.append(f"{label}：{shown}")
-            sections.append(section)
+        # 段落按异常优先排序：超预算只能从尾部截断，被砍掉的应是成功站点明细而不是失败原因
+        sections: List[str] = ["\n".join(summary)]
+        if failed:
+            sections.append(f"【失败 {len(failed)} 站】\n" + "\n\n".join(failed))
+        if exchanged:
+            sections.append(f"【已兑换 {len(exchanged)} 站】\n" + "\n\n".join(exchanged))
+        if skip_lines:
+            sections.append(f"【未兑换 {skip_total} 站】\n" + "\n".join(skip_lines))
 
-        message = "\n\n".join("\n".join(section) for section in sections)
-        if len(message) > self._MAX_NOTIFY_LEN:
-            message = (f"{message[:self._MAX_NOTIFY_LEN].rstrip()}"
-                       f"\n…（内容过长已截断，详见插件页面记录）")
+        message = "\n\n".join(sections)
+        # 企微限制的是整条 content 的 UTF-8 字节数（标题同样占额度），超限就只保留前段
+        footer = "\n…（内容过长已截断，完整明细见插件详情页）"
+        budget = (self._MAX_NOTIFY_BYTES
+                  - self._utf8_bytes(f"{self._NOTIFY_TITLE}\n{footer}"))
+        if self._utf8_bytes(message) > budget:
+            message = self._cut_utf8(message, budget) + footer
+        return message
 
+    @staticmethod
+    def _utf8_bytes(text: str) -> int:
+        """按 UTF-8 计量字节数：企微这类渠道按字节限制长度，一个中文就占 3 字节。"""
+        return len(text.encode("utf-8"))
+
+    @staticmethod
+    def _cut_utf8(text: str, limit: int) -> str:
+        """按字节预算截断并在字符边界收尾，避免把一个中文切成半个乱码。"""
+        if limit <= 0:
+            return ""
+        return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore").rstrip()
+
+    def _send_notification(self, today_data: dict) -> None:
+        """发送兑换结果通知：正文与详情页共用同一份行数据，这里只负责投递。"""
         self.post_message(
             mtype=NotificationType.SiteMessage,
-            title="魔力值自动兑换完成",
-            text=message
+            title=self._NOTIFY_TITLE,
+            text=self._build_notification_text(today_data),
         )
 
 
@@ -2404,8 +2535,7 @@ class NexusPHPBonusAdapter:
             logger.debug(f"解析到 {len(items)} 个兑换项目，当前魔力值: {result['current_bonus']}")
 
         except Exception as e:
-            logger.error(f"解析魔力商店失败: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"解析魔力商店失败: {str(e)}", exc_info=True)
             return None
 
         return result
