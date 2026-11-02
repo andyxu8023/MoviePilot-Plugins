@@ -1,0 +1,2772 @@
+"""
+NexusPHP 魔力值自动兑换插件
+
+读取 MoviePilot 已配置站点，按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。
+支持自适应限速、多站并发、单站串行、安全熔断与任务统计。
+"""
+
+import json
+import os
+import re
+import threading
+import time
+from datetime import datetime, timedelta
+from html import escape as _html_escape
+from html import unescape as _html_unescape
+from multiprocessing.dummy import Pool as ThreadPool
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin
+
+import pytz
+from app.core.config import settings
+from app.db.site_oper import SiteOper
+from app.helper.sites import SitesHelper
+from app.log import logger
+from app.plugins import _PluginBase
+from app.schemas.types import NotificationType
+from app.utils.http import RequestUtils
+from app.utils.string import StringUtils
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# 演练模式哨兵文件：存在时只解析商店并输出兑换计划，不提交任何兑换
+_DRY_RUN_FLAG = "/config/temp/autobonusexchange_dry_run"
+
+
+class AutoBonusExchange(_PluginBase):
+    """NexusPHP 魔力值自动兑换插件：按架构适配器动态解析魔力商店并按策略自动兑换上传/下载量。"""
+
+    # 插件名称
+    plugin_name = "魔力值自动兑换"
+    # 插件描述
+    plugin_desc = "读取 MoviePilot 已配置站点，按策略自动兑换上传/下载量。(不支持部分站点)"
+    # 插件图标
+    plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/AutoBonusExchange.png"
+    # 插件版本
+    plugin_version = "2.1.11"
+    # 插件作者
+    plugin_author = "左岸"
+    # 作者主页
+    author_url = "https://github.com/andyxu8023"
+    # 插件配置项ID前缀
+    plugin_config_prefix = "autobonusexchange_"
+    # 加载顺序
+    plugin_order = 100
+    # 可使用的用户级别
+    auth_level = 2
+
+    # 定时器
+    _scheduler: Optional[BackgroundScheduler] = None
+
+    # 配置属性
+    _enabled: bool = False
+    _cron: str = ""
+    _onlyonce: bool = False
+    _notify: bool = False
+    _queue_cnt: int = 3
+    _bonus_sites: list = []
+    _strategy: str = "fixed"
+    _exchange_type: str = "upload"  # upload, download, both
+    _keep_balance: float = 0
+    _max_retry: int = 3
+    _circuit_break_threshold: int = 5
+    _rate_limit_ms: int = 1000
+    # 「上传+下载」保活模式：单站单轮最多兑换次数，0 表示不限制
+    _max_steps: int = 0
+    # 上传档被禁用后，连续换几笔下载仍未解锁就停止，0 表示不限制
+    _max_download_to_unlock: int = 0
+    # 不限制时的内部硬上限：防止消耗解析为 0 的异常档位或站点余额不变导致循环卡死
+    _HARD_MAX_STEPS = 100
+
+    # 运行时状态
+    # 熔断计数按轮次维护：exchange_bonus 每轮开始都会重建实例字典，这里的空字典只作兜底
+    _circuit_breaker: Dict[str, int] = {}
+    # 多站点并发兑换时保护熔断计数的读写
+    _breaker_lock = threading.RLock()
+    _force_run: bool = False
+    # 演练模式：存在 _DRY_RUN_FLAG 文件时只输出计划、不提交兑换
+    _dry_run: bool = False
+
+    def init_plugin(self, config: dict = None) -> None:
+        """根据插件配置初始化运行状态。"""
+        # 停止现有任务
+        self.stop_service()
+
+        # 演练模式：哨兵文件存在时只出计划，用于上线前验证档位与方向
+        self._dry_run = os.path.exists(_DRY_RUN_FLAG)
+        if self._dry_run:
+            logger.warn(f"检测到演练标记 {_DRY_RUN_FLAG}，本轮只输出兑换计划，不会提交任何兑换")
+
+        # 配置
+        if config:
+            self._enabled = bool(config.get("enabled", False))
+            self._cron = str(config.get("cron", "") or "") or "0 0 1 * *"
+            self._onlyonce = bool(config.get("onlyonce", False))
+            self._notify = bool(config.get("notify", False))
+            # 并发数至少 1：ThreadPool(0) 会直接抛异常，让整轮兑换静默失败
+            self._queue_cnt = max(1, self._conf_int(config.get("queue_cnt"), 3, "并发站点数"))
+            # 站点列表必须是实例属性，否则多个插件实例共用同一个类级列表
+            self._bonus_sites = list(config.get("bonus_sites", []) or [])
+            self._strategy = str(config.get("strategy", "fixed") or "fixed")
+            self._exchange_type = str(config.get("exchange_type", "upload") or "upload")
+            self._keep_balance = self._conf_float(config.get("keep_balance"), 0.0, "保留魔力值")
+            self._max_retry = self._conf_int(config.get("max_retry"), 3, "单档重试次数")
+            self._circuit_break_threshold = self._conf_int(
+                config.get("circuit_break_threshold"), 5, "熔断失败阈值")
+            self._rate_limit_ms = self._conf_int(config.get("rate_limit_ms"), 1000, "兑换间隔毫秒")
+            self._force_run = bool(config.get("force_run", False))
+            # 留空、0 或负数都按「不限制」处理
+            self._max_steps = max(0, self._conf_int(config.get("max_steps"), 0, "单站最多兑换次数"))
+            self._max_download_to_unlock = max(
+                0, self._conf_int(config.get("max_download_to_unlock"), 0, "解锁换下载次数"))
+
+            # 剔除已删除站点要留痕：这些 ID 会从配置里静默消失，没有日志的话
+            # 用户只会觉得「勾过的站不见了」
+            all_sites = {site.id for site in SiteOper().list_order_by_pri()}
+            dropped = [site_id for site_id in self._bonus_sites if site_id not in all_sites]
+            if dropped:
+                logger.warning(f"魔力值兑换配置中 {len(dropped)} 个站点已不在站点表，"
+                               f"本次移出勾选：{dropped}")
+            self._bonus_sites = [site_id for site_id in self._bonus_sites
+                                 if site_id in all_sites]
+
+            # 保存配置
+            self._save_config()
+
+        # 熔断计数字典在实例上重建，写入不再污染类级默认对象
+        self._circuit_breaker = {}
+
+        # 启动任务
+        if self._enabled or self._onlyonce:
+            if self._onlyonce:
+                self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+                logger.info("魔力值自动兑换服务启动，立即运行一次")
+                self._scheduler.add_job(
+                    func=self.exchange_bonus,
+                    trigger='date',
+                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                    name="魔力值自动兑换"
+                )
+                # 关闭一次性开关
+                self._onlyonce = False
+                self._save_config()
+
+                # 启动任务
+                if self._scheduler.get_jobs():
+                    self._scheduler.print_jobs()
+                    self._scheduler.start()
+
+    def get_state(self) -> bool:
+        """获取插件启用状态。"""
+        return self._enabled
+
+    def _save_config(self) -> None:
+        """保存插件配置。"""
+        self.update_config({
+            "enabled": self._enabled,
+            "notify": self._notify,
+            "cron": self._cron,
+            "onlyonce": self._onlyonce,
+            "queue_cnt": self._queue_cnt,
+            "bonus_sites": self._bonus_sites,
+            "strategy": self._strategy,
+            "exchange_type": self._exchange_type,
+            "keep_balance": self._keep_balance,
+            "max_retry": self._max_retry,
+            "circuit_break_threshold": self._circuit_break_threshold,
+            "rate_limit_ms": self._rate_limit_ms,
+            "max_steps": self._max_steps,
+            "max_download_to_unlock": self._max_download_to_unlock,
+            "force_run": self._force_run,
+        })
+
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        """返回插件远程命令列表。"""
+        return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册插件公共服务。"""
+        if self._enabled and self._cron:
+            try:
+                if str(self._cron).strip().count(" ") == 4:
+                    return [{
+                        "id": "AutoBonusExchange",
+                        "name": "魔力值自动兑换服务",
+                        "trigger": CronTrigger.from_crontab(self._cron),
+                        "func": self.exchange_bonus,
+                        "kwargs": {}
+                    }]
+                logger.warning("魔力值自动兑换定时任务未注册：执行周期仅支持5位cron表达式")
+            except Exception as err:
+                logger.error(f"魔力兑换定时任务配置错误：{str(err)}")
+        return []
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """返回插件配置表单与默认配置。"""
+        # 站点选项
+        site_options = [{"title": site.name, "value": site.id}
+                        for site in SiteOper().list_order_by_pri()]
+
+        return [
+            {
+                "component": "VForm",
+                "content": [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "enabled", "label": "启用插件"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "notify", "label": "发送通知"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "onlyonce", "label": "立即运行一次"}
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "force_run", "label": "强制运行(忽略今日已完成)"}
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VCronField",
+                                    "props": {
+                                        "model": "cron",
+                                        "label": "执行周期",
+                                        "placeholder": "5位cron表达式，留空默认 0 0 1 * *"
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "strategy",
+                                        "label": "兑换策略",
+                                        "items": [
+                                            {"title": "最大化兑换", "value": "maximize"},
+                                            {"title": "保留余额", "value": "keep_balance"}
+                                        ]
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "exchange_type",
+                                        "label": "兑换类型",
+                                        "items": [
+                                            {"title": "仅上传量", "value": "upload"},
+                                            {"title": "仅下载量", "value": "download"},
+                                            {"title": "上传+下载", "value": "both"}
+                                        ]
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "keep_balance",
+                                        "label": "保留魔力值",
+                                        "type": "number",
+                                        "placeholder": "0"
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "rate_limit_ms",
+                                        "label": "请求间隔(ms)",
+                                        "type": "number",
+                                        "placeholder": "1000"
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "circuit_break_threshold",
+                                        "label": "熔断阈值(次)",
+                                        "type": "number",
+                                        "placeholder": "连续失败次数"
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "max_steps",
+                                        "label": "单站单轮最多兑换次数",
+                                        "type": "number",
+                                        "placeholder": "留空或 0 = 不限制",
+                                        "hint": "「上传+下载」按分享率保活逐笔兑换时生效，默认不限制、换到预算用完为止；"
+                                                "填数值可配合请求间隔控制单轮耗时",
+                                        "persistent_hint": True
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "max_download_to_unlock",
+                                        "label": "解锁上传最多换下载(次)",
+                                        "type": "number",
+                                        "placeholder": "留空或 0 = 不限制",
+                                        "hint": "默认不限制：上传档被站点禁用后一直换下载，直到上传档解锁或下载档换完；"
+                                                "填数值可限制连续换下载的次数，避免分享率被压过头",
+                                        "persistent_hint": True
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [{
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "bonus_sites",
+                                        "label": "兑换站点",
+                                        "items": site_options,
+                                        "multiple": True,
+                                        "chips": True
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "queue_cnt",
+                                        "label": "并发站点数",
+                                        "type": "number",
+                                        "placeholder": "3"
+                                    }
+                                }]
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "max_retry",
+                                        "label": "最大重试次数",
+                                        "type": "number",
+                                        "placeholder": "3"
+                                    }
+                                }]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ], {
+            "enabled": False,
+            "notify": False,
+            "cron": "0 0 1 * *",
+            "onlyonce": False,
+            "queue_cnt": 3,
+            "bonus_sites": [],
+            "strategy": "fixed",
+            "exchange_type": "upload",
+            "keep_balance": 0,
+            "max_retry": 3,
+            "circuit_break_threshold": 5,
+            "rate_limit_ms": 1000,
+            "max_steps": 0,
+            "max_download_to_unlock": 0,
+            "force_run": False,
+        }
+
+    # 详情页往前追溯兑换记录的天数
+    _LOOKBACK_DAYS = 30
+    # 日期按钮条最多展示的日期数，当前查看的日期始终保证可见
+    _MAX_DATE_BUTTONS = 14
+
+    def get_page(self) -> Optional[List[dict]]:
+        """返回插件详情页面：用日期按钮切换查看对应的兑换记录。"""
+        if not self._enabled:
+            return None
+
+        today = datetime.today().strftime('%Y-%m-%d')
+        days = self._list_record_days(today)
+        if not days:
+            return [self._build_alert(f"近 {self._LOOKBACK_DAYS} 天内暂无兑换记录")]
+
+        selected = self._selected_view_day(today, days)
+        records = self.get_data(key=f"bonus_{selected}") or {}
+
+        blocks = []
+        # 查看的是历史日期时，把今日状态说明放在最上面，先看状态再选日期
+        if selected != today:
+            blocks.append(self._build_alert("今日暂无兑换记录，当前展示所选日期的记录"))
+        blocks.append(self._build_date_bar(self._visible_days(days, selected), selected, today))
+        title = ("今日兑换记录" if selected == today
+                 else f"兑换记录（{self._run_label(selected, records)}）")
+        blocks.append(self._build_records_card(title, records))
+        return blocks
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        """注册插件自定义接口，供详情页日期按钮回写查看日期。"""
+        return [
+            {
+                "path": "/set_view_date",
+                "endpoint": self.set_view_date,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "切换魔力值自动兑换详情页查看的记录日期",
+            }
+        ]
+
+    def set_view_date(self, date: str = "") -> dict:
+        """
+        保存详情页要展示的兑换日期，前端调用成功后会自动重新拉取页面。
+
+        返回值必须严格是 success/message/data 三个键：宿主前端把不满足这一信封结构的
+        响应判为 invalid-envelope，会提示「服务器返回了无效响应」并且不再刷新详情页。
+        """
+        day = self._normalize_date(date)
+        if not day:
+            return {"success": False, "message": "日期格式不正确，应为 YYYY-MM-DD", "data": None}
+        records = self.get_data(key=f"bonus_{day}")
+        if not records or not records.get("results"):
+            return {"success": False, "message": f"{day} 没有兑换记录", "data": None}
+        # 记下回写时间，隔天自动失效，避免页面一直停在很久以前选的日期
+        self.save_data(key="view_date", value={
+            "date": day,
+            "set_at": datetime.today().strftime('%Y-%m-%d'),
+        })
+        logger.info(f"魔力值兑换详情页切换查看日期：{day}")
+        return {"success": True, "message": f"已切换到 {day}", "data": {"date": day}}
+
+    @staticmethod
+    def _build_alert(text: str) -> dict:
+        """页面顶部的一条提示信息。"""
+        return {
+            "component": "VAlert",
+            "props": {"type": "info", "variant": "tonal", "class": "mb-3", "text": text},
+        }
+
+    @staticmethod
+    def _normalize_date(value: Any) -> Optional[str]:
+        """把外部传入的日期规范化成 YYYY-MM-DD，非法值返回 None。"""
+        text = str(value or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return None
+        try:
+            datetime.strptime(text, '%Y-%m-%d')
+        except ValueError:
+            return None
+        return text
+
+    def _list_record_days(self, today: str) -> List[str]:
+        """
+        返回最近有站点处理结果的日期（新→旧）。
+
+        get_data() 不带 key 时一次取回本插件全部记录，代替原来按天循环的 31 次查询；
+        批量路径异常时退回逐日扫描，保证详情页只是慢一点而不是打不开。
+        """
+        base = datetime.strptime(today, '%Y-%m-%d')
+        window = {(base - timedelta(days=offset)).strftime('%Y-%m-%d')
+                  for offset in range(0, self._LOOKBACK_DAYS + 1)}
+        days: List[str] = []
+        try:
+            for row in (self.get_data() or []):
+                key = getattr(row, "key", "") or ""
+                if not key.startswith("bonus_"):
+                    continue
+                day = key[len("bonus_"):]
+                if day not in window or day in days:
+                    continue
+                value = getattr(row, "value", None)
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        continue
+                if isinstance(value, dict) and value.get("results"):
+                    days.append(day)
+        except Exception as err:
+            logger.debug(f"批量读取兑换记录失败，改回逐日扫描：{str(err)}")
+            days = []
+            for day in sorted(window, reverse=True):
+                try:
+                    records = self.get_data(key=f"bonus_{day}")
+                except Exception as day_err:
+                    # 单日读取失败只跳过这天，不能让详情页整个报错
+                    logger.debug(f"{day} 记录读取失败，跳过：{str(day_err)}")
+                    continue
+                if records and records.get("results"):
+                    days.append(day)
+        return sorted(days, reverse=True)
+
+    def _requested_view_day(self, today: str) -> Optional[str]:
+        """读取日期按钮回写的查看日期；隔天自动失效，避免一直停在历史日期。"""
+        saved = self.get_data(key="view_date")
+        if isinstance(saved, dict):
+            if str(saved.get("set_at") or "") != today:
+                return None
+            return self._normalize_date(saved.get("date"))
+        # 兼容早期直接存日期字符串的记录
+        return self._normalize_date(saved)
+
+    def _selected_view_day(self, today: str, days: List[str]) -> str:
+        """优先用查看日期，无效时回到今天或最近一次记录。"""
+        view_date = self._requested_view_day(today)
+        if view_date and view_date in days:
+            return view_date
+        if today in days:
+            return today
+        return days[0]
+
+    def _visible_days(self, days: List[str], selected: str) -> List[str]:
+        """日期按钮限量展示，但当前查看的日期保证可见。"""
+        visible = days[:self._MAX_DATE_BUTTONS]
+        if selected in visible:
+            return visible
+        return [selected] + visible[:max(self._MAX_DATE_BUTTONS - 1, 0)]
+
+    def _build_date_bar(self, days: List[str], selected: str, today: str) -> dict:
+        """渲染日期切换条：每天一个可点片，点击后回写查看日期并自动刷新页面。"""
+        api = f"plugin/{self.__class__.__name__}/set_view_date"
+        chips = []
+        for day in days:
+            is_current = day == selected
+            chips.append({
+                "component": "VChip",
+                "props": {
+                    "size": "small",
+                    "clickable": True,
+                    "ripple": False,
+                    "class": "text-none",
+                    "variant": "flat" if is_current else "tonal",
+                    "color": "primary" if is_current else "grey-lighten-3",
+                },
+                "text": "今日" if day == today else day,
+                "events": {
+                    "click": {
+                        "api": api,
+                        "method": "get",
+                        "params": {"date": day},
+                    }
+                },
+            })
+        return {
+            "component": "VCard",
+            "props": {"variant": "outlined", "flat": True, "class": "mb-3 pa-3"},
+            "content": [{
+                "component": "div",
+                "props": {"style": self._FLEX_ROW_STYLE},
+                "content": [{
+                    "component": "span",
+                    "props": {"class": "text-caption text-medium-emphasis mr-1"},
+                    "text": "查看日期",
+                }] + chips
+            }]
+        }
+
+    @staticmethod
+    def _run_label(day: str, records: dict) -> str:
+        """给历史卡片标题带上当时的执行时间，形如 2026-10-05 09:00。"""
+        started = str(records.get("start_time") or "")
+        # start_time 形如 2026-10-05T09:00:00.017683，只保留到分钟
+        if len(started) >= 16 and started[:10] == day:
+            return f"{day} {started[11:16]}"
+        return day
+
+    # 状态文案与展示顺序：有动作的排前面，异常次之，被跳过的最后
+    _STATUS_TEXT = {"success": "成功", "failed": "失败", "skipped": "跳过", "unknown": "未知"}
+    _STATUS_ORDER = {"success": 0, "failed": 1, "skipped": 2, "unknown": 3}
+    # 弹性行容器：按内容宽度排列并自动换行，避开 VRow/VCol 在窄屏下撑出大间距
+    _FLEX_ROW_STYLE = "display:flex;flex-wrap:wrap;gap:6px;align-items:center"
+
+    def _aggregate(self, results: dict) -> dict:
+        """汇总一轮兑换，页面副标题与通知首行共用同一口径。"""
+        total_count = 0
+        total_cost = 0.0
+        all_exchanged: List[dict] = []
+        counts = {"success": 0, "failed": 0, "skipped": 0, "unknown": 0}
+        for result in (results or {}).values():
+            status = str(result.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            exchanged = result.get("exchanged") or []
+            if status != "success" or not exchanged:
+                continue
+            rows = self._group_exchanged(exchanged)
+            total_count += len(exchanged)
+            total_cost += sum(row["cost"] * row["count"] for row in rows)
+            all_exchanged.extend(exchanged)
+        return {
+            "count": total_count,
+            "cost": total_cost,
+            "traffic": self._sum_traffic(all_exchanged),
+            "sites": len(results or {}),
+            "success": counts["success"],
+            "failed": counts["failed"],
+            "skipped": counts["skipped"],
+        }
+
+    def _build_summary_subtitle(self, summary: dict) -> str:
+        """卡片副标题一行看完本轮成果与站点处理情况。"""
+        parts = []
+        if summary["count"]:
+            parts.append(f"兑换 {summary['count']} 笔")
+            parts.append(f"消耗 {self._fmt_num(summary['cost'])} 魔力值")
+            if summary["traffic"]:
+                parts.append(f"获得 {summary['traffic']}")
+        else:
+            parts.append("本轮没有兑换动作")
+        parts.append(f"成功 {summary['success']} · 失败 {summary['failed']} · "
+                     f"跳过 {summary['skipped']} · 共 {summary['sites']} 个站点")
+        return " · ".join(parts)
+
+    # 兑换表格列定义：标题、列宽、对齐方式，顺序与下面的 _cell_* 严格对应
+    _TABLE_COLUMNS = (
+        ("站点", "14%", "start"),
+        ("状态", "7%", "start"),
+        ("魔力值", "19%", "end"),
+        ("分享率", "14%", "end"),
+        ("兑换档位", "23%", "start"),
+        ("说明", "23%", "start"),
+    )
+    # 单元格分隔线单独成常量，最后一行要去掉它，避免与表格外框叠成双线
+    _TD_BORDER = "border-bottom:thin solid rgba(var(--v-theme-on-surface),.08)"
+    # 单元格公共样式：内容顶对齐，长档位名按列宽自动折行，分隔线用主题前景色保证明暗可见
+    _TD_STYLE = f"padding:7px 12px;vertical-align:top;word-break:break-word;{_TD_BORDER}"
+    # 次要文字统一用主题前景色加透明度，明暗自适应，不写死灰值
+    _MUTED_STYLE = "color:rgba(var(--v-theme-on-surface),.6)"
+    _SMALL_STYLE = "font-size:.75rem"
+    # 状态徽章：HTML 片段里用不了 VChip 组件，按内联样式做同款胶囊，颜色仍取主题变量
+    _BADGE_STYLE = ("display:inline-block;padding:1px 9px;border-radius:9999px;"
+                    "font-size:.72rem;line-height:1.6;font-weight:500;white-space:nowrap")
+    _BADGE_COLOR = {
+        "success": "background:rgb(var(--v-theme-success));color:#fff",
+        "failed": "background:rgb(var(--v-theme-error));color:#fff",
+        "skipped": "background:rgb(var(--v-theme-warning));color:#212121",
+        "unknown": "background:rgba(var(--v-theme-on-surface),.12);"
+                   "color:rgba(var(--v-theme-on-surface),.7)",
+    }
+
+    # 分享率一行形如「分享率(推演) 5.03 → 5.08（↑0.05）」，拆出标签、数值与尾部变化
+    _RATIO_LINE_RE = re.compile(
+        r"^(?P<label>分享率(?:\([^)]*\))?)\s+(?P<value>.*?)(?P<tail>（[^）]*）)?$")
+
+    @classmethod
+    def _split_ratio(cls, text: str) -> Tuple[str, str, str]:
+        """
+        拆分享率一行：表头已说明这一列是分享率，所以主行只留数值，
+        「未变动」「↑0.05」这类尾注与「(推演)」标注降到小字，避免长串在窄列里折行。
+        """
+        if not text:
+            return "", "", ""
+        matched = cls._RATIO_LINE_RE.match(text.strip())
+        if not matched:
+            return text, "", ""
+        tag = matched.group("label").replace("分享率", "", 1)
+        value = matched.group("value").strip()
+        tail = (matched.group("tail") or "").strip("（）")
+        return value or text, tag, tail
+
+    def _site_rows(self, results: dict) -> List[dict]:
+        """
+        把一轮兑换结果规整成行数据：宽屏表格与窄屏列表共用同一份口径，
+        站点按状态与消耗排序，同档位多笔在这里合并，两种渲染不再各算各的。
+        """
+
+        def _sort_key(pair) -> Tuple[int, float]:
+            """成功、失败、跳过依次排列，同状态内按消耗从大到小。"""
+            _, result = pair
+            status = str(result.get("status") or "unknown")
+            cost = sum(row["cost"] * row["count"]
+                       for row in self._group_exchanged(result.get("exchanged") or []))
+            return self._STATUS_ORDER.get(status, 3), -cost
+
+        def _bonus(value) -> str:
+            """未取到魔力值时显示占位符，避免看起来像被清零。"""
+            return self._fmt_num(value) if value else "—"
+
+        rows: List[dict] = []
+        for site_name, result in sorted((results or {}).items(), key=_sort_key):
+            status = str(result.get("status") or "unknown")
+            groups = self._group_exchanged(result.get("exchanged") or [])
+            site_cost = sum(row["cost"] * row["count"] for row in groups)
+            before, after = _bonus(result.get("bonus_before")), _bonus(result.get("bonus_after"))
+            found = before != "—"
+            changed = before != after
+
+            items = []
+            for group in groups:
+                # 单笔不带 ×1，多笔合并成一行，窄屏不被重复条目刷屏
+                name = group["name"]
+                label = name if group["count"] == 1 else f"{name} ×{group['count']}"
+                items.append({"label": label, "cost": group["cost"]})
+
+            ratio_text = self._ratio_text(result)
+            ratio_value, ratio_tag, ratio_delta = self._split_ratio(ratio_text)
+
+            # 每条说明存两份：正文与配色语气，窄屏与宽屏都按列语义展示，不再拼整句前缀
+            notes: List[Tuple[str, str]] = []
+            note = self._one_line(result.get("note"), 90)
+            error = self._one_line(result.get("error"), 90)
+            if error:
+                tone = "error" if status == "failed" else "muted"
+                notes.append((error, tone))
+            if note:
+                notes.append((note, "muted"))
+            elif status == "success":
+                missed = [a for a in (result.get("attempts") or []) if not a.get("success")]
+                if missed:
+                    detail = self._one_line(missed[0].get("detail"), 90)
+                    notes.append((detail or missed[0].get("item") or "兑换未生效", "muted"))
+            if result.get("dry_run"):
+                # 演练模式的逐笔推演跟在原因行后面，第一行已作为原因显示，这里只补步骤行
+                for extra in str(result.get("error") or "").split("\n")[1:]:
+                    if extra.strip():
+                        notes.append((extra.strip(), "muted"))
+
+            rows.append({
+                "site": site_name,
+                "status": status,
+                "status_text": self._STATUS_TEXT.get(status, "未知"),
+                "dry_run": bool(result.get("dry_run")),
+                "bonus_found": found,
+                "bonus_changed": changed,
+                "bonus_before": before,
+                "bonus_after": after,
+                "cost": site_cost,
+                "ratio": ratio_value,
+                "ratio_tag": ratio_tag,
+                "ratio_delta": ratio_delta,
+                "items": items,
+                "notes": notes,
+            })
+        return rows
+
+    def _cell_open(self, index: int, extra: str = "") -> str:
+        """生成 td 起始标签：数值列右对齐并用等宽数字，纵向比大小不错位。"""
+        align = self._TABLE_COLUMNS[index][2]
+        style = self._TD_STYLE
+        if align == "end":
+            style = f"{style};text-align:end;font-variant-numeric:tabular-nums"
+        return f'<td style="{style};{extra}">'
+
+    def _cell_site(self, row: dict) -> str:
+        """站点列：名字长短不一，加粗并按列宽折行。"""
+        return f'{self._cell_open(0, "font-weight:500")}{_html_escape(row["site"])}</td>'
+
+    def _cell_status(self, row: dict) -> str:
+        """状态列：胶囊徽章，演练模式在徽章下补一行小字。"""
+        color = self._BADGE_COLOR.get(row["status"], self._BADGE_COLOR["unknown"])
+        badge = (f'<span style="{self._BADGE_STYLE};{color}">'
+                 f'{_html_escape(row["status_text"])}</span>')
+        if row["dry_run"]:
+            badge += (f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE};margin-top:2px">'
+                      f'演练</div>')
+        return f"{self._cell_open(1)}{badge}</td>"
+
+    def _cell_bonus(self, row: dict) -> str:
+        """魔力值列：主值给前后变化，消耗或未变动作小字补充。"""
+        if not row["bonus_found"]:
+            return (f'{self._cell_open(2)}<span style="{self._MUTED_STYLE}">'
+                    f'未取到</span></td>')
+        if row["bonus_changed"]:
+            main = f'{row["bonus_before"]} → {row["bonus_after"]}'
+            sub = f'-{self._fmt_num(row["cost"])}'
+        else:
+            main = row["bonus_before"]
+            sub = "未变动"
+        return (f'{self._cell_open(2)}<div>{_html_escape(main)}</div>'
+                f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                f'{_html_escape(sub)}</div></td>')
+
+    def _cell_ratio(self, row: dict) -> str:
+        """分享率列：主行只给数值，涨跌或未变动与「推演」标注降到小字。"""
+        if not row["ratio"]:
+            return f'{self._cell_open(3)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = f'<div>{_html_escape(row["ratio"])}</div>'
+        tail = " ".join(part for part in (row["ratio_delta"], row["ratio_tag"]) if part)
+        if tail:
+            cells += (f'<div style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                      f'{_html_escape(tail)}</div>')
+        return f"{self._cell_open(3)}{cells}</td>"
+
+    def _cell_items(self, row: dict) -> str:
+        """兑换档位列：一行一个档位，单价作尾注小字。"""
+        if not row["items"]:
+            return f'{self._cell_open(4)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = []
+        for item in row["items"]:
+            price = (f'<span style="{self._SMALL_STYLE};{self._MUTED_STYLE}">'
+                     f' · 单价 {self._fmt_num(item["cost"])}</span>')
+            cells.append(f'<div>{_html_escape(item["label"])}{price}</div>')
+        return f"{self._cell_open(4)}{''.join(cells)}</td>"
+
+    def _cell_notes(self, row: dict) -> str:
+        """说明列：列头已表明是说明，所以不再带「原因：」「说明：」前缀，失败用主题错误色。"""
+        if not row["notes"]:
+            return f'{self._cell_open(5)}<span style="{self._MUTED_STYLE}">—</span></td>'
+        cells = []
+        for text, tone in row["notes"]:
+            color = ("color:rgb(var(--v-theme-error))" if tone == "error"
+                     else self._MUTED_STYLE)
+            cells.append(f'<div style="{self._SMALL_STYLE};{color}">'
+                         f'{_html_escape(text)}</div>')
+        return f"{self._cell_open(5)}{''.join(cells)}</td>"
+
+    @staticmethod
+    def _row_shade(index: int) -> str:
+        """偶数行加一层极淡底色，横向扫读不错行。"""
+        return "background:rgba(var(--v-theme-on-surface),.035)" if index % 2 else ""
+
+    def _records_table(self, rows: List[dict]) -> str:
+        """
+        宽屏兑换表格。
+
+        走 PageRender 的 html 分支由浏览器解析整段表格标记：逐层用组件搭 <tr>/<td>
+        会在每个插槽里插入空白文本节点，落在表格结构上容易错行，浏览器解析则最稳。
+        """
+        if not rows:
+            return (f'<div style="padding:12px;{self._MUTED_STYLE}">'
+                    f'本轮没有站点处理结果</div>')
+        heads = []
+        for title, width, align in self._TABLE_COLUMNS:
+            heads.append(
+                f'<th style="width:{width};text-align:{align};padding:7px 12px;'
+                f'font-weight:500;white-space:nowrap;'
+                f'border-bottom:thin solid rgba(var(--v-theme-on-surface),.22)">'
+                f'{_html_escape(title)}</th>'
+            )
+        bodies = []
+        for index, row in enumerate(rows):
+            bodies.append(
+                f'<tr style="{self._row_shade(index)}">'
+                f'{self._cell_site(row)}{self._cell_status(row)}{self._cell_bonus(row)}'
+                f'{self._cell_ratio(row)}{self._cell_items(row)}{self._cell_notes(row)}'
+                f'</tr>'
+            )
+        # 最后一行的分隔线贴着外框，去掉才不留双线
+        bodies[-1] = bodies[-1].replace(f";{self._TD_BORDER}", "")
+        return ('<div class="v-table v-table--density-compact v-table--hover"'
+                ' style="border:thin solid rgba(var(--v-border-color),var(--v-border-opacity));'
+                'border-radius:8px;overflow:hidden;color:rgb(var(--v-theme-on-surface))">'
+                '<div class="v-table__wrapper">'
+                '<table style="table-layout:fixed;border-collapse:collapse">'
+                f'<thead><tr>{"".join(heads)}</tr></thead>'
+                f'<tbody>{"".join(bodies)}</tbody>'
+                '</table></div></div>')
+
+    # 窄屏堆叠卡片样式：标签定宽、数值等宽右对齐，与宽屏表格共用同一份行数据
+    _STACK_CARD = "padding:9px 0;border-bottom:thin solid rgba(var(--v-theme-on-surface),.08)"
+    _STACK_ROW = "display:flex;gap:8px;align-items:baseline;padding:2px 0"
+    _STACK_HEAD = "display:flex;gap:8px;align-items:center;padding-bottom:4px"
+    _STACK_LABEL = f"flex:none;min-width:3.5em;{_SMALL_STYLE};{_MUTED_STYLE}"
+    _STACK_VALUE = "flex:1;word-break:break-word;font-variant-numeric:tabular-nums"
+    _STACK_TAIL = f"flex:none;text-align:end;{_SMALL_STYLE};{_MUTED_STYLE};font-variant-numeric:tabular-nums"
+    _STACK_WRAP = "display:flex;flex-wrap:wrap;gap:6px;align-items:center"
+    _STACK_CHIP = ("display:inline-block;padding:3px 9px;border-radius:6px;font-size:.78rem;"
+                   "background:rgba(var(--v-theme-on-surface),.06);"
+                   "color:rgba(var(--v-theme-on-surface),.75)")
+    # 说明块用左侧竖条加淡底与明细行区分，失败改错误色竖条
+    _STACK_NOTE = ("margin:5px 0 1px;padding:4px 8px;border-left:2px solid "
+                   "rgba(var(--v-theme-on-surface),.24);background:rgba(var(--v-theme-on-surface),.04);"
+                   "border-radius:0 4px 4px 0;font-size:.78rem;"
+                   "color:rgba(var(--v-theme-on-surface),.72);word-break:break-word")
+    _STACK_NOTE_ERROR = ("margin:5px 0 1px;padding:4px 8px;border-left:2px solid rgb(var(--v-theme-error));"
+                         "background:rgba(var(--v-theme-error),.08);border-radius:0 4px 4px 0;"
+                         "font-size:.78rem;color:rgba(var(--v-theme-on-surface),.8);word-break:break-word")
+
+    def _stack_badge(self, row: dict) -> str:
+        """状态徽章：与宽屏表格同款胶囊，同一状态在两种屏下配色一致。"""
+        color = self._BADGE_COLOR.get(row["status"], self._BADGE_COLOR["unknown"])
+        return (f'<span style="{self._BADGE_STYLE};{color}">'
+                f'{_html_escape(row["status_text"])}</span>')
+
+    def _stack_row(self, label: str, value: str, tail: str = "") -> str:
+        """窄屏一行：定宽标签 + 主值 + 右端小字，长值按剩余宽度折行。"""
+        tail_html = (f'<span style="{self._STACK_TAIL}">{_html_escape(tail)}</span>'
+                     if tail else "")
+        return (f'<div style="{self._STACK_ROW}">'
+                f'<span style="{self._STACK_LABEL}">{_html_escape(label)}</span>'
+                f'<span style="{self._STACK_VALUE}">{_html_escape(value)}</span>'
+                f'{tail_html}</div>')
+
+    def _stack_card(self, row: dict, last: bool) -> str:
+        """窄屏单个站点块：名字与徽章同行，魔力值、分享率、档位分行，说明独立成块。"""
+        dry = (f'<span style="{self._SMALL_STYLE};{self._MUTED_STYLE}">演练</span>'
+               if row["dry_run"] else "")
+        head = (f'<div style="{self._STACK_HEAD}">'
+                f'<span style="flex:1;font-weight:500;word-break:break-word">'
+                f'{_html_escape(row["site"])}</span>{dry}{self._stack_badge(row)}</div>')
+        parts = [head]
+        if not row["bonus_found"]:
+            parts.append(self._stack_row("魔力值", "未取到"))
+        elif row["bonus_changed"]:
+            parts.append(self._stack_row(
+                "魔力值", f'{row["bonus_before"]} → {row["bonus_after"]}',
+                f'-{self._fmt_num(row["cost"])}'))
+        else:
+            parts.append(self._stack_row("魔力值", row["bonus_before"], "未变动"))
+        if row["ratio"]:
+            tail = " ".join(part for part in (row["ratio_delta"], row["ratio_tag"]) if part)
+            parts.append(self._stack_row("分享率", row["ratio"], tail))
+        for index, item in enumerate(row["items"]):
+            # 首个档位带标签，其余留空对齐，单价一律靠右
+            parts.append(self._stack_row(
+                "档位" if not index else "", item["label"],
+                f'单价 {self._fmt_num(item["cost"])}'))
+        if row["notes"]:
+            style = (self._STACK_NOTE_ERROR
+                     if any(tone == "error" for _, tone in row["notes"])
+                     else self._STACK_NOTE)
+            texts = "<br>".join(_html_escape(text) for text, _ in row["notes"])
+            parts.append(f'<div style="{style}">{texts}</div>')
+        divider = "" if last else self._STACK_CARD
+        return f'<div style="{divider}">{"".join(parts)}</div>'
+
+    def _stack_summary(self, summary: dict) -> str:
+        """窄屏汇总：状态计数沿用徽章配色，成果数字用淡底片，比整行长句好扫读。"""
+        chips = []
+        for status in ("success", "failed", "skipped"):
+            count = summary[status]
+            # 计数为 0 的类别退成灰徽章，不让满屏红绿造成误读
+            color = self._BADGE_COLOR.get(status if count else "unknown",
+                                          self._BADGE_COLOR["unknown"])
+            chips.append(f'<span style="{self._BADGE_STYLE};{color}">'
+                         f'{self._STATUS_TEXT[status]} {count}</span>')
+        facts = [f'共 {summary["sites"]} 个站点']
+        if summary["count"]:
+            facts.append(f'兑换 {summary["count"]} 笔')
+            facts.append(f'消耗 {self._fmt_num(summary["cost"])} 魔力值')
+            if summary["traffic"]:
+                facts.append(f'获得 {summary["traffic"]}')
+        else:
+            facts.append("本轮没有兑换动作")
+        chips.extend(f'<span style="{self._STACK_CHIP}">{_html_escape(fact)}</span>'
+                     for fact in facts)
+        return f'<div style="{self._STACK_WRAP};padding:2px 0 8px">{"".join(chips)}</div>'
+
+    def _records_stack(self, rows: List[dict], summary: dict) -> str:
+        """窄屏整块内容：汇总片在前，站点按状态与消耗顺序分块，数据与宽屏表格同源。"""
+        chips = self._stack_summary(summary)
+        if not rows:
+            return (f'{chips}<div style="padding:12px 0;{self._MUTED_STYLE}">'
+                    f'本轮没有站点处理结果</div>')
+        cards = [self._stack_card(row, index == len(rows) - 1)
+                 for index, row in enumerate(rows)]
+        return chips + "".join(cards)
+
+    def _build_records_card(self, title: str, records: dict) -> dict:
+        """兑换记录卡片：汇总行在前，宽屏用表格，窄屏回退成按站点的行式列表。"""
+        results = records.get("results") or {}
+        summary = self._aggregate(results)
+        rows = self._site_rows(results)
+
+        return {
+            "component": "VCard",
+            "props": {"title": title, "class": "mb-3"},
+            "content": [
+                {
+                    # 宽屏一行汇总就够；窄屏改由下方徽章与淡底片承载，避免长句折成三行
+                    "component": "div",
+                    "props": {
+                        "class": "d-none d-md-block text-caption text-medium-emphasis px-4 pt-1 pb-2",
+                        "style": self._WRAP_STYLE,
+                    },
+                    "text": self._build_summary_subtitle(summary),
+                },
+                {
+                    # ≥960px 显示表格；列宽固定，档位与说明在单元格内折行
+                    "component": "div",
+                    "props": {"class": "d-none d-md-block px-4 pb-2"},
+                    "html": self._records_table(rows),
+                },
+                {
+                    # 窄屏堆叠卡片：同一份行数据，标签定宽、数值右端对齐，不做横向滚动
+                    "component": "div",
+                    "props": {
+                        "class": "d-md-none px-4 pb-2",
+                        "style": "color:rgb(var(--v-theme-on-surface))",
+                    },
+                    "html": self._records_stack(rows, summary),
+                },
+            ]
+        }
+
+    def stop_service(self) -> None:
+        """停止插件后台服务并释放资源。"""
+        if self._scheduler:
+            try:
+                self._scheduler.remove_all_jobs()
+                if self._scheduler.running:
+                    self._scheduler.shutdown()
+                self._scheduler = None
+            except Exception as e:
+                logger.error(f"停止魔力兑换服务失败：{str(e)}")
+
+    def exchange_bonus(self) -> None:
+        """执行魔力兑换任务。"""
+        logger.info("开始执行 NexusPHP 魔力兑换任务...")
+
+        # 演练标记每轮重读：不重载插件也能切换演练，不再只在加载时读一次
+        self._dry_run = os.path.exists(_DRY_RUN_FLAG)
+        if self._dry_run:
+            logger.warning(f"检测到演练标记 {_DRY_RUN_FLAG}，本轮只输出兑换计划，不提交任何兑换")
+        # 熔断计数每轮清零：原实现只累加从不清空，站点会因历史失败被永久跳过
+        self._circuit_breaker = {}
+
+        # 获取今日日期
+        today = datetime.today().strftime('%Y-%m-%d')
+
+        # 检查今日是否已执行（可通过配置强制跳过）
+        today_data = self.get_data(key=f"bonus_{today}")
+        if today_data and today_data.get("completed") and not self._force_run:
+            logger.info(f"今日 {today} 已完成魔力兑换，跳过")
+            return
+
+        self._force_run = False  # 重置强制标志
+
+        # 获取所有站点
+        all_sites = [site for site in SitesHelper().get_indexers() if not site.get("public")]
+
+        # 过滤目标站点
+        if self._bonus_sites:
+            target_sites = [site for site in all_sites if site.get("id") in self._bonus_sites]
+        else:
+            target_sites = all_sites
+
+        if not target_sites:
+            logger.info("没有需要兑换的站点")
+            return
+
+        # 初始化今日数据
+        today_data = {
+            "date": today,
+            "completed": False,
+            "results": {},
+            "start_time": datetime.now().isoformat(),
+        }
+
+        # 并发执行兑换（并发数下限 1，配置留空时 ThreadPool(0) 会直接抛异常）
+        workers = min(len(target_sites), max(1, self._queue_cnt))
+        logger.info(f"开始兑换，共 {len(target_sites)} 个站点，并发数 {workers}")
+
+        with ThreadPool(workers) as p:
+            results = p.map(self._exchange_site, target_sites)
+
+        # 汇总结果
+        for site_name, result in results:
+            today_data["results"][site_name] = result
+
+        today_data["completed"] = True
+        today_data["end_time"] = datetime.now().isoformat()
+
+        # 保存今日数据
+        self.save_data(key=f"bonus_{today}", value=today_data)
+
+        # 发送通知
+        if self._notify:
+            self._send_notification(today_data)
+
+        logger.info(f"魔力兑换任务完成，共处理 {len(results)} 个站点")
+
+    def _fetch_bonus_info(self, req_utils: RequestUtils, site_name: str, site_url: str,
+                          bonus_url: str, adapter: "NexusPHPBonusAdapter",
+                          save_debug: bool = True) -> Tuple[Optional[dict], Any]:
+        """
+        获取并解析魔力商店页面，供逐笔兑换之间刷新档位可用状态使用。
+
+        :param req_utils: 请求工具
+        :param site_name: 站点名称
+        :param site_url: 站点地址
+        :param bonus_url: 魔力商店地址
+        :param adapter: 魔力商店适配器
+        :param save_debug: 是否保存页面到调试目录（仅首次获取时保存，保留兑换前的原始页面）
+        :return: (商店解析结果, 响应对象)，取不到时第一项为 None
+        """
+        try:
+            res = req_utils.get_res(url=bonus_url)
+        except Exception as e:
+            logger.error(f"{site_name} 获取魔力商店异常: {str(e)}")
+            return None, None
+
+        if not res or res.status_code != 200:
+            if res is None:
+                logger.warn(f"{site_name} 获取魔力商店失败：请求无响应（网络不通、超时或被站点拒绝，Cookie 可能已失效）")
+            else:
+                logger.warn(f"{site_name} 获取魔力商店失败：状态码 {res.status_code}（多为 Cookie 失效或被站点拦截）")
+            return None, res
+
+        html = res.text or ""
+
+        # 调试：保存 HTML 到文件
+        if save_debug:
+            try:
+                debug_dir = "/config/temp/bonus_debug"
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_file = f"{debug_dir}/{site_name.replace(' ', '_')}_mybonus.html"
+                with open(debug_file, "w", encoding="utf-8") as f:
+                    f.write(html)
+                logger.info(f"{site_name} HTML 已保存到: {debug_file}")
+            except Exception as e:
+                logger.debug(f"保存调试文件失败: {e}")
+
+        if '/api/bonus-shop/getItems' in html:
+            bonus_info = self._parse_api_bonus_page(req_utils, site_url, html)
+        else:
+            bonus_info = adapter.parse_bonus_page(html)
+            if bonus_info and not bonus_info.get("available_items"):
+                logger.debug(f"{site_name} 魔力商店 HTML 前 2000 字符:\n{html[:2000]}")
+                form_match = re.search(r'<form[^>]*>.*?</form>', html, re.DOTALL | re.IGNORECASE)
+                if form_match:
+                    logger.debug(f"{site_name} 找到 form:\n{form_match.group(0)[:1500]}")
+                table_match = re.search(r'<table[^>]*>.*?</table>', html, re.DOTALL | re.IGNORECASE)
+                if table_match:
+                    logger.debug(f"{site_name} 找到 table:\n{table_match.group(0)[:1500]}")
+
+        if bonus_info is not None:
+            # 商店页头部就带站点自己的分享率，顺手取下来，不必再去抓用户中心页
+            bonus_info["user_ratio"] = self._parse_page_ratio(html)
+        return bonus_info, res
+
+    # 档位名里的体积解析，支持 KB/MB/GB/TB 与 KiB/MiB/GiB/TiB 写法
+    _TIER_SIZE_RE = re.compile(r"([\d.]+)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)", re.IGNORECASE)
+    _SIZE_TO_GB = {"KB": 1 / 1024 ** 2, "KIB": 1 / 1024 ** 2,
+                   "MB": 1 / 1024, "MIB": 1 / 1024,
+                   "GB": 1.0, "GIB": 1.0,
+                   "TB": 1024.0, "TIB": 1024.0}
+    # 档位类别标签
+    _KIND_LABELS = {"upload": "上传量", "download": "下载量"}
+
+    def _item_kind(self, item: dict) -> str:
+        """判断档位类别：upload / download / other。"""
+        b_type = str(item.get("b_type") or "").lower()
+        if b_type == "uploaded":
+            return "upload"
+        if b_type == "downloaded":
+            return "download"
+        name = str(item.get("name") or "").lower()
+        if "上传" in name or "upload" in name:
+            return "upload"
+        if "下载" in name or "download" in name:
+            return "download"
+        return "other"
+
+    def _split_by_kind(self, items: List[dict]) -> Dict[str, List[dict]]:
+        """把档位按上传量/下载量分组，只保留站点当前允许兑换的档位。"""
+        pools: Dict[str, List[dict]] = {"upload": [], "download": []}
+        for item in items or []:
+            if not item.get("available", True):
+                continue
+            kind = self._item_kind(item)
+            if kind in pools:
+                pools[kind].append(item)
+        return pools
+
+    @classmethod
+    def _tier_size_gb(cls, item: dict) -> float:
+        """解析档位代表的流量体积（GB），解析不出返回 0。"""
+        for text in (item.get("name"), item.get("gain")):
+            matched = cls._TIER_SIZE_RE.search(str(text or ""))
+            if not matched:
+                continue
+            try:
+                value = float(matched.group(1))
+            except ValueError:
+                continue
+            return value * cls._SIZE_TO_GB.get(matched.group(2).upper(), 1.0)
+        try:
+            amount = float(item.get("b_amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        return amount / (1024 ** 3) if amount > 0 else 0.0
+
+    def _step_limit(self) -> int:
+        """单站单轮兑换次数上限：配置为 0/留空表示不限制，但仍受内部硬上限保护。"""
+        if self._max_steps and self._max_steps > 0:
+            return int(self._max_steps)
+        return self._HARD_MAX_STEPS
+
+    def _step_limit_reason(self) -> str:
+        """达到次数上限时的说明文案，区分用户设置的上限与内部硬上限。"""
+        if self._max_steps and self._max_steps > 0:
+            return f"已达单站单轮最多兑换次数上限 {int(self._max_steps)}"
+        return (f"单站单轮兑换次数达到内部硬上限 {self._HARD_MAX_STEPS}"
+                f"（余额或档位异常，剩余档位下次运行继续）")
+
+    def _unlock_download_limit(self) -> Optional[int]:
+        """解锁上传档允许连续换几笔下载量：0/留空表示不限制，返回 None。"""
+        if self._max_download_to_unlock and self._max_download_to_unlock > 0:
+            return int(self._max_download_to_unlock)
+        return None
+
+    def _budget_for(self, bonus_info: dict) -> float:
+        """按兑换策略计算本轮可花掉的魔力值。"""
+        current_bonus = bonus_info.get("current_bonus", 0) or 0
+        if self._strategy == "maximize":
+            return current_bonus
+        return current_bonus - self._keep_balance
+
+    def _select_best_item(self, bonus_info: dict,
+                          prefer: Optional[str] = None) -> Tuple[List[dict], Optional[dict], float]:
+        """
+        选出当前预算下性价比最高的一档。
+
+        :param bonus_info: 魔力商店信息
+        :param prefer: 限定类别 upload/download；为空时按配置的兑换类型取全部流量档
+        :return: (候选档位列表, 选中的档位, 可用预算)，选不出时第二项为 None
+        """
+        items = bonus_info.get("available_items") or []
+        if prefer in ("upload", "download"):
+            pool = self._split_by_kind(items)[prefer]
+        else:
+            pool = [item for item in self._filter_traffic_items(items) if item.get("available", True)]
+        budget = self._budget_for(bonus_info)
+        if not pool or budget <= 0:
+            return pool, None, budget
+        ranked = sorted(pool, key=lambda x: (x.get("ratio", 0), x.get("cost", 0)), reverse=True)
+        for item in ranked:
+            if (item.get("cost") or float("inf")) <= budget:
+                return pool, item, budget
+        return pool, None, budget
+
+    def _pick_next_step(self, bonus_info: dict) -> Tuple[Optional[dict], str]:
+        """
+        决定下一笔兑换哪个档位：「上传+下载」模式下上传档可用时只换上传量，
+        上传档被站点全部禁用时换一笔下载量把分享率压回去，直到上传档重新可兑换。
+
+        :param bonus_info: 魔力商店信息
+        :return: (下一步档位, 停止原因)，档位为 None 时 reason 说明原因
+        """
+        budget = self._budget_for(bonus_info)
+        if budget <= 0:
+            if self._strategy == "maximize":
+                return None, "魔力值已用尽"
+            return None, "已达保留值，不继续兑换"
+
+        if self._exchange_type == "both":
+            upload_pool, upload_best, _ = self._select_best_item(bonus_info, prefer="upload")
+            if upload_pool:
+                if not upload_best:
+                    return None, f"上传量档位最低消耗已超过可用魔力值 {self._fmt_num(budget)}"
+                return upload_best, ""
+            download_pool = self._split_by_kind(bonus_info.get("available_items") or [])["download"]
+            if not download_pool:
+                return None, "上传量档位已全部被站点禁用，且没有可用的下载量档位来压低分享率解锁"
+            # 解锁用的下载量按最小步进优先：分享率降得最慢，冲过站点阈值的幅度最小；
+            # 解析不出体积的档位排在最后，避免把大额档当成小额档一步压过头
+            ranked = sorted(download_pool,
+                            key=lambda x: (self._tier_size_gb(x) or float("inf"), x.get("cost") or 0))
+            for item in ranked:
+                if (item.get("cost") or float("inf")) <= budget:
+                    return item, ""
+            min_cost = min((item.get("cost") or 0) for item in download_pool)
+            return None, (f"下载量档位最低消耗 {self._fmt_num(min_cost)} 已超过可用魔力值 "
+                          f"{self._fmt_num(budget)}")
+
+        _, best_item, _ = self._select_best_item(bonus_info)
+        if best_item:
+            return best_item, ""
+        return None, "没有预算内可兑换的档位"
+
+    # 商店页统计块的分享率，标签与数值之间可能夹冒号、方括号、全角符号与空白
+    _PAGE_RATIO_RE = re.compile(r"分享率[^0-9\n]{0,12}(\d[\d,]*(?:\.\d+)?)")
+
+    @classmethod
+    def _parse_page_ratio(cls, html_text: str) -> Optional[float]:
+        """
+        直接读取魔力商店页上站点显示的分享率，取不到时返回 None。
+
+        NexusPHP 魔力商店页头部就带「分享率: x.xxx」，与站点用户数据里的值同源，
+        但页面是当场抓的，比库里的每日快照更新，因此优先用它。
+        """
+        if not html_text:
+            return None
+        text = re.sub(r"\s+", " ", _html_unescape(re.sub(r"<[^>]+>", " ", html_text)))
+        for matched in cls._PAGE_RATIO_RE.finditer(text):
+            raw = matched.group(1).replace(",", "")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if 0 < value < 100000:
+                return value
+        return None
+
+    def _latest_site_traffic(self, site_url: str) -> Optional[dict]:
+        """
+        取站点最近一次上报的上传量/下载量，用于预测兑换后的分享率。
+        站点用户数据里的流量单位是字节，这里统一换算成 GB，与档位体积同一量纲。
+
+        :param site_url: 站点地址
+        :return: {upload, download, ratio, updated_day}，取不到时 None
+        """
+        try:
+            domain = StringUtils.get_url_domain(site_url)
+            if not domain:
+                return None
+            rows = SiteOper().get_userdata_by_domain(domain) or []
+            current = [row for row in rows if not row.err_msg] or rows
+            if not current:
+                return None
+            latest = max(current, key=lambda row: (str(row.updated_day or ""),
+                                                   str(row.updated_time or ""), row.id or 0))
+            upload = float(latest.upload or 0) / (1024 ** 3)
+            download = float(latest.download or 0) / (1024 ** 3)
+            if upload <= 0 or download <= 0:
+                return None
+            return {
+                "upload": upload,
+                "download": download,
+                # 与预测口径一致，统一用上传/下载重算，站点原值仅作展示参考
+                "ratio": upload / download,
+                "ratio_site": float(latest.ratio or 0),
+                "updated_day": latest.updated_day,
+            }
+        except Exception as e:
+            logger.debug(f"{site_url} 读取站点用户数据失败: {str(e)}")
+            return None
+
+    def _simulate_ratio(self, traffic: Optional[dict], steps: List[dict]) -> str:
+        """按推演后的分享率给出「11.44 → 8.02」文本，取不到基线时返回空串。"""
+        pair = self._simulate_ratio_pair(traffic, steps)
+        return f"{pair[0]:.2f} → {pair[1]:.2f}" if pair else ""
+
+    @staticmethod
+    def _simulate_ratio_pair(traffic: Optional[dict],
+                             steps: List[dict]) -> Optional[Tuple[float, float]]:
+        """
+        按「兑换上传量增加上传、兑换下载量增加下载」的方向推演一串步骤后的分享率。
+        方向以用户站点实际语义为准，取不到基线时返回 None。
+
+        :param traffic: _latest_site_traffic 结果
+        :param steps: 步骤列表，每项需含 kind 与 gb
+        :return: (兑换前分享率, 兑换后分享率)
+        """
+        if not traffic:
+            return None
+        upload = float(traffic.get("upload") or 0)
+        download = float(traffic.get("download") or 0)
+        if upload <= 0 or download <= 0:
+            return None
+        before = upload / download
+        for step in steps:
+            size = step.get("gb") or 0
+            if step.get("kind") == "upload":
+                upload += size
+            elif step.get("kind") == "download":
+                download += size
+        after = upload / download if download > 0 else 0
+        return before, after
+
+    def _dry_run_site(self, site_name: str, site_url: str,
+                      bonus_info: dict, result: dict) -> Tuple[str, dict]:
+        """
+        演练模式：按保活规则离线推演兑换顺序，只输出计划与预测分享率，不提交任何兑换。
+        不重新请求商店，因此档位禁用状态不会真的变化，上传档被禁用时按「已解锁」推演后续花费。
+
+        :param site_name: 站点名称
+        :param site_url: 站点地址
+        :param bonus_info: 首次解析到的商店信息
+        :param result: 本站结果字典
+        :return: (站点名称, 结果)
+        """
+        page_ratio = bonus_info.get("user_ratio")
+        # 演练不真兑换，要推演「照这个计划换完会变成多少」仍需绝对上传/下载量，这里照旧取站点数据基线
+        traffic = self._latest_site_traffic(site_url)
+        display_before = page_ratio or (traffic or {}).get("ratio")
+        if display_before:
+            result["ratio_before"] = round(float(display_before), 4)
+            result["ratio_after"] = result["ratio_before"]
+            result["ratio_source"] = "站点页面" if page_ratio else "站点数据基线"
+        items = bonus_info.get("available_items") or []
+        pools = self._split_by_kind(items)
+        upload_items = [item for item in self._filter_traffic_items(items)
+                        if self._item_kind(item) == "upload"]
+        upload_locked = bool(upload_items) and not pools["upload"]
+
+        unlocked_info = dict(bonus_info)
+        unlocked_info["available_items"] = [dict(item, available=True) for item in items]
+
+        steps: List[dict] = []
+        running = bonus_info.get("current_bonus", 0) or 0
+        reason = ""
+        max_steps = self._step_limit()
+        unlock_limit = self._unlock_download_limit()
+        download_steps = 0
+        # 上传档被禁用时：先按真实（禁用）视图推演下载压分享率，
+        # 达到次数上限后改按「假设已解锁」视图推演剩余花费，演练不提交兑换所以状态不会真的变化
+        views = ([bonus_info, unlocked_info]
+                 if (self._exchange_type == "both" and upload_locked) else [bonus_info])
+        view_index = 0
+        while len(steps) < max_steps:
+            sim_info = dict(views[view_index])
+            sim_info["current_bonus"] = running
+            item, stop_reason = self._pick_next_step(sim_info)
+            if not item:
+                reason = stop_reason
+                break
+            kind = self._item_kind(item)
+            steps.append({
+                "item": item.get("name"),
+                "kind": kind,
+                "cost": item.get("cost") or 0,
+                "gb": self._tier_size_gb(item),
+            })
+            running -= (item.get("cost") or 0)
+            if kind == "download" and view_index == 0 and len(views) > 1:
+                download_steps += 1
+                if unlock_limit is not None and download_steps >= unlock_limit:
+                    view_index = 1
+
+        if not steps:
+            result["status"] = "skipped"
+            result["error"] = f"演练模式未提交兑换：无可推演档位（{reason or '商店没有可用档位'}）"
+            logger.info(f"{site_name} 演练模式：无可推演档位")
+            return site_name, result
+
+        lines = []
+        for index, step in enumerate(steps, 1):
+            text = (f"{index}. {step['item']} → {self._fmt_num(step['gb'])} GB"
+                    f"{self._KIND_LABELS.get(step['kind'], '')}，消耗 {self._fmt_num(step['cost'])}")
+            lines.append(text)
+        total_cost = sum(step["cost"] for step in steps)
+        if page_ratio:
+            base_text = f"当前分享率 {float(page_ratio):.2f}（商店页显示值）"
+        elif traffic:
+            base_text = (f"基线分享率 {traffic['ratio']:.2f}"
+                         f"（{traffic['updated_day']} 站点数据）")
+        else:
+            base_text = "未取到站点分享率，跳过分享率预测"
+        if view_index > 0:
+            base_text += (f"；前 {download_steps} 笔为压低分享率解锁上传档，"
+                          f"之后按上传档已解锁推演花费")
+        elif len(views) > 1:
+            base_text += (f"；换下载解锁上传档未设次数上限，整轮 {download_steps} 笔都按下载档推演"
+                          f"（真跑时上传档一解锁就切回上传）")
+        summary = (f"演练模式未提交兑换：共 {len(steps)} 笔，预计消耗 {self._fmt_num(total_cost)} 魔力；"
+                   f"{base_text}；预测分享率 {self._simulate_ratio(traffic, steps) or '未知'}")
+        if not reason:
+            reason = self._step_limit_reason() if len(steps) >= max_steps else "预算用尽"
+        ratio_pair = self._simulate_ratio_pair(traffic, steps)
+        if ratio_pair:
+            result["ratio_after"] = round(ratio_pair[1], 4)
+        result["dry_run"] = {
+            "steps": len(steps),
+            "cost": total_cost,
+            "reason": reason,
+            "predicted": self._simulate_ratio(traffic, steps),
+        }
+        result["status"] = "skipped"
+        result["error"] = f"{summary}\n" + "\n".join(lines) + f"\n停止原因: {reason}"
+        logger.info(f"{site_name} 演练计划：\n{result['error']}")
+        return site_name, result
+
+    def _exchange_site(self, site_info: dict) -> Tuple[str, dict]:
+        """
+        兑换单个站点的魔力值。
+
+        :param site_info: 站点信息字典
+        :return: (站点名称, 兑换结果字典)
+        """
+        site_name = site_info.get("name", "未知站点")
+        result = {
+            "status": "unknown",
+            "bonus_before": 0,
+            "bonus_after": 0,
+            "exchanged": [],
+            "error": None,
+            "note": None,
+            "attempts": [],
+        }
+
+        try:
+            # 检查熔断器
+            if self._check_circuit_breaker(site_name):
+                result["status"] = "skipped"
+                result["error"] = (f"本轮该站已连续失败 {self._circuit_breaker.get(site_name, 0)} 次，"
+                                   f"达到熔断阈值 {self._circuit_break_threshold}，跳过")
+                logger.warn(f"{site_name} 已触发熔断，跳过兑换")
+                return site_name, result
+
+            # 获取站点信息
+            site_url = site_info.get("url", "")
+            site_cookie = site_info.get("cookie", "")
+            site_apikey = site_info.get("apikey", "")
+            site_token = site_info.get("token", "")
+            ua = site_info.get("ua", "")
+            proxies = settings.PROXY if site_info.get("proxy") else None
+            timeout = site_info.get("timeout") or 60
+
+            if not site_url:
+                result["status"] = "failed"
+                result["error"] = "未配置站点地址"
+                logger.warn(f"{site_name} 未配置站点地址")
+                return site_name, result
+
+            # 判断认证方式 - 优先使用cookie
+            auth_mode = None
+            if site_cookie:
+                auth_mode = "cookie"
+            elif site_token:
+                auth_mode = "token"
+            elif site_apikey:
+                auth_mode = "apikey"
+            else:
+                result["status"] = "failed"
+                result["error"] = "未配置认证信息(Cookie/APIKey/Token)"
+                logger.warn(f"{site_name} 未配置认证信息")
+                return site_name, result
+
+            logger.info(f"{site_name} 使用 {auth_mode} 认证模式")
+
+            # 创建请求客户端
+            if auth_mode == "token":
+                # 馒头等使用 token 认证的站点
+                req_utils = RequestUtils(
+                    headers={
+                        "Authorization": site_token,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/plain, */*",
+                    },
+                    ua=ua,
+                    proxies=proxies,
+                    timeout=timeout
+                )
+            elif auth_mode == "apikey":
+                # 高清杜比等使用 apikey 认证的站点
+                req_utils = RequestUtils(
+                    headers={
+                        "x-api-key": site_apikey,
+                    },
+                    ua=ua,
+                    proxies=proxies,
+                    timeout=timeout
+                )
+            else:
+                # Cookie 认证
+                req_utils = RequestUtils(
+                    cookies=site_cookie,
+                    ua=ua,
+                    proxies=proxies,
+                    timeout=timeout
+                )
+
+            # 获取魔力商店页面 - 检测实际URL
+            # 有些站点用 mybonus.php，有些用 bonusshop.php
+            bonus_url = urljoin(site_url, "mybonus.php")
+            logger.info(f"开始获取 {site_name} 魔力商店: {bonus_url}")
+
+            res = req_utils.get_res(url=bonus_url)
+            
+            # 检查页面是否包含兑换表单，如果没有则尝试 bonusshop.php
+            has_exchange_form = res and res.status_code == 200 and re.search(r'<form[^>]*action=["\']?\?action=exchange["\']?', res.text, re.IGNORECASE)
+            
+            # 检查是否使用API模式（如青蛙站点）
+            is_api_mode = res and res.status_code == 200 and '/api/bonus-shop/getItems' in res.text
+            
+            if not has_exchange_form and not is_api_mode:
+                alt_url = urljoin(site_url, "bonusshop.php")
+                logger.info(f"{site_name} mybonus.php 无兑换表单，尝试备用URL: {alt_url}")
+                alt_res = req_utils.get_res(url=alt_url)
+                if alt_res and alt_res.status_code == 200:
+                    res = alt_res
+                    bonus_url = alt_url
+                    # 重新检查是否为API模式
+                    is_api_mode = '/api/bonus-shop/getItems' in res.text
+            
+            if not res or res.status_code != 200:
+                result["status"] = "failed"
+                if res is None:
+                    result["error"] = "获取魔力商店失败：请求无响应（网络不通、超时或被站点拒绝，Cookie 可能已失效）"
+                else:
+                    result["error"] = f"获取魔力商店失败：状态码 {res.status_code}（多为 Cookie 失效或被站点拦截）"
+                logger.warn(f"{site_name} 获取魔力商店失败")
+                self._record_circuit_break(site_name)
+                return site_name, result
+
+            # 解析魔力商店
+            adapter = NexusPHPBonusAdapter()
+            
+            # 如果是API模式，使用API获取兑换项目
+            if is_api_mode:
+                logger.info(f"{site_name} 使用API模式获取兑换项目")
+            bonus_info, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                   bonus_url, adapter, save_debug=True)
+
+            if not bonus_info:
+                result["status"] = "failed"
+                result["error"] = "解析魔力商店失败"
+                logger.warn(f"{site_name} 解析魔力商店失败")
+                self._record_circuit_break(site_name)
+                return site_name, result
+
+            result["bonus_before"] = bonus_info.get("current_bonus", 0)
+            # 没有发生兑换时余额不变，跳过/失败的记录也要给出变化后的值
+            result["bonus_after"] = result["bonus_before"]
+
+            # 分享率优先用商店页上站点自己显示的值；页面解析不到才退回站点用户数据基线（每日快照）
+            page_ratio = bonus_info.get("user_ratio")
+            ratio_traffic = None if page_ratio else self._latest_site_traffic(site_url)
+            if page_ratio:
+                result["ratio_before"] = round(float(page_ratio), 4)
+                result["ratio_after"] = result["ratio_before"]
+                result["ratio_source"] = "站点页面"
+            elif ratio_traffic:
+                result["ratio_before"] = round(ratio_traffic["ratio"], 4)
+                result["ratio_after"] = result["ratio_before"]
+                result["ratio_source"] = "站点数据基线"
+                logger.info(f"{site_name} 商店页未解析到分享率，按 {ratio_traffic['updated_day']} "
+                            f"站点数据基线 {ratio_traffic['ratio']:.2f} 推演")
+
+            # 检查魔力值是否足够
+            if bonus_info.get("current_bonus", 0) <= self._keep_balance:
+                result["status"] = "skipped"
+                result["error"] = (f"当前魔力值 {bonus_info.get('current_bonus')} 未超过保留值 "
+                                   f"{self._keep_balance}，按设置不兑换")
+                logger.info(f"{site_name} 魔力值不足，跳过")
+                return site_name, result
+
+            # 演练模式：只输出计划与预测分享率，不提交任何兑换
+            if self._dry_run:
+                return self._dry_run_site(site_name, site_url, bonus_info, result)
+
+            # 兑换类型决定执行方式：「上传+下载」逐笔决策，换下载量后重抓商店刷新禁用状态；
+            # 「仅上传量」「仅下载量」沿用一次算好的静态方案，与旧版行为一致
+            oscillate = self._exchange_type == "both"
+            exchange_plan = [] if oscillate else self._calculate_exchange_plan(bonus_info)
+
+            if not oscillate and not exchange_plan:
+                result["status"] = "skipped"
+                result["error"] = self._diagnose_no_plan(bonus_info)
+                logger.info(f"{site_name} 无可用兑换方案: {result['error']}")
+                return site_name, result
+
+            # 执行兑换
+            running_bonus = bonus_info.get("current_bonus", 0) or 0
+            live_info = dict(bonus_info)
+            delta_steps: List[dict] = []
+            download_fail = 0
+            stop_reason = ""
+            max_steps = self._step_limit() if oscillate else len(exchange_plan)
+            unlock_limit = self._unlock_download_limit()
+            for step_index in range(max_steps):
+                if oscillate:
+                    live_info["current_bonus"] = running_bonus
+                    item, stop_reason = self._pick_next_step(live_info)
+                    if not item:
+                        if not result["exchanged"]:
+                            result["error"] = stop_reason or self._diagnose_no_plan(live_info)
+                        else:
+                            result["note"] = f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}"
+                        logger.info(f"{site_name} 停止兑换：{result.get('error') or result.get('note')}")
+                        break
+                else:
+                    item = exchange_plan[step_index]
+
+                # 检查项目是否可用
+                if not item.get("available", True):
+                    logger.info(f"{site_name} 跳过不可用项目: {item.get('name')}")
+                    continue
+                
+                # 如果是API模式，使用API兑换
+                bonus_of_item = running_bonus
+                kind = self._item_kind(item)
+                is_unlock_step = oscillate and kind == "download"
+                if is_api_mode:
+                    exchange_result = self._exchange_api_item(
+                        req_utils=req_utils,
+                        site_url=site_url,
+                        item_id=item.get("option"),
+                        item_name=item.get("name"),
+                        cost=item.get("cost")
+                    )
+                else:
+                    exchange_result = adapter.exchange_item(
+                        req_utils=req_utils,
+                        bonus_url=bonus_url,
+                        item_id=item.get("option"),
+                        item_name=item.get("name"),
+                        cost=item.get("cost"),
+                        bonus_before=bonus_of_item
+                    )
+
+                if exchange_result.get("success"):
+                    result["exchanged"].append({
+                        "item": item.get("name"),
+                        "cost": item.get("cost"),
+                        "gain": item.get("gain", ""),
+                    })
+                    result["attempts"].append({
+                        "item": item.get("name"),
+                        "cost": item.get("cost"),
+                        "success": True,
+                        "detail": (f"扣除 {exchange_result.get('deduct', item.get('cost'))}，"
+                                   f"余额 {bonus_of_item} → {exchange_result.get('bonus_after') or '未知'}")
+                    })
+                    logger.info(f"{site_name} 兑换成功: {item.get('name')} (消耗: {item.get('cost')})")
+                    # 用站点确认后的余额继续比对下一笔，取不到就按消耗推算
+                    observed_bonus = exchange_result.get("bonus_after")
+                    running_bonus = observed_bonus if observed_bonus else running_bonus - (item.get("cost") or 0)
+                    delta_steps.append({"kind": kind, "gb": self._tier_size_gb(item)})
+                    predicted = self._simulate_ratio(ratio_traffic, delta_steps)
+                    if predicted:
+                        result["ratio_predict"] = predicted
+                    # 限速
+                    time.sleep(self._rate_limit_ms / 1000)
+
+                    # 换下载量的唯一目的是让分享率回落到允许兑换上传量的区间：
+                    # 立即重抓商店页刷新档位禁用状态，上传档重新可兑换就切回上传
+                    if is_unlock_step:
+                        refreshed, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                              bonus_url, adapter, save_debug=False)
+                        if not refreshed:
+                            stop_reason = "兑换下载量后重新获取魔力商店失败"
+                            result["note"] = (f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}，"
+                                              "档位状态未确认")
+                            break
+                        live_info = refreshed
+                        running_bonus = refreshed.get("current_bonus", 0) or running_bonus
+                        # 重抓的页面顺带刷新站点显示的分享率，中途停止也留有最新值
+                        refreshed_ratio = refreshed.get("user_ratio")
+                        if refreshed_ratio:
+                            result["ratio_after"] = round(float(refreshed_ratio), 4)
+                        if self._split_by_kind(refreshed.get("available_items") or [])["upload"]:
+                            download_fail = 0
+                            result["note"] = f"兑换 {item.get('name')} 后上传量档位已解锁"
+                            logger.info(f"{site_name} {result['note']}")
+                        else:
+                            download_fail += 1
+                            logger.info(f"{site_name} 兑换 {item.get('name')} 后上传量档位仍不可兑换"
+                                        f"（连续 {download_fail} 次）")
+                            if unlock_limit is not None and download_fail >= unlock_limit:
+                                stop_reason = ("连续兑换下载量后上传量档位仍未解锁，"
+                                               "禁用原因可能不是分享率（等级或次数限制）")
+                                result["note"] = (f"成功 {len(result['exchanged'])} 笔后停止：{stop_reason}")
+                                break
+                else:
+                    fail_detail = (f"{exchange_result.get('error')}（余额 {bonus_of_item} → "
+                                   f"{exchange_result.get('bonus_after') or '未知'}）")
+                    result["attempts"].append({
+                        "item": item.get("name"),
+                        "cost": item.get("cost"),
+                        "success": False,
+                        "detail": fail_detail
+                    })
+                    logger.warn(f"{site_name} 兑换 {item.get('name')} 失败: {fail_detail}，停止本站本轮兑换")
+                    self._record_circuit_break(site_name)
+                    if result["exchanged"]:
+                        result["note"] = f"成功 {len(result['exchanged'])} 笔后停止：{fail_detail}"
+                    else:
+                        result["error"] = f"{item.get('name')} 兑换失败：{fail_detail}"
+                    break
+
+            if oscillate and not stop_reason and len(result["exchanged"]) >= max_steps:
+                result["note"] = f"{self._step_limit_reason()}，剩余档位下次运行继续"
+
+            # 只有商店页取不到分享率时才按成交增量推演，页面值本身是站点显示的实测值
+            if (ratio_traffic and delta_steps
+                    and result.get("ratio_source") != "站点页面"):
+                ratio_pair = self._simulate_ratio_pair(ratio_traffic, delta_steps)
+                if ratio_pair:
+                    result["ratio_after"] = round(ratio_pair[1], 4)
+                    result["ratio_predict"] = f"{ratio_pair[0]:.2f} → {ratio_pair[1]:.2f}"
+
+            # 收尾再抓一次商店页：魔力值和站点显示的分享率都从这页取，不额外请求用户中心
+            new_bonus_info, _ = self._fetch_bonus_info(req_utils, site_name, site_url,
+                                                       bonus_url, adapter, save_debug=False)
+            if new_bonus_info:
+                result["bonus_after"] = new_bonus_info.get("current_bonus", 0)
+                final_ratio = new_bonus_info.get("user_ratio")
+                if final_ratio:
+                    result["ratio_after"] = round(float(final_ratio), 4)
+                    result["ratio_source"] = "站点页面"
+
+            self._finish_site_status(result, site_name)
+
+        except Exception as e:
+            result["status"] = "failed"
+            result["error"] = str(e)
+            logger.error(f"{site_name} 兑换异常: {str(e)}", exc_info=True)
+            self._record_circuit_break(site_name)
+
+        return site_name, result
+
+    def _calculate_exchange_plan(self, bonus_info: dict) -> List[dict]:
+        """
+        根据策略计算兑换方案。
+
+        :param bonus_info: 魔力商店信息
+        :return: 兑换方案列表
+        """
+        available_items = bonus_info.get("available_items", [])
+        if not available_items:
+            return []
+
+        # 「仅上传量」「仅下载量」：选出最优档位后重复兑换到预算用尽
+        _, best_item, budget = self._select_best_item(bonus_info)
+        if not best_item:
+            return []
+
+        plan = []
+        remaining = budget
+        cost = best_item.get("cost") or 0
+        while cost > 0 and remaining >= cost:
+            plan.append(best_item)
+            remaining -= cost
+        return plan
+
+    def _diagnose_no_plan(self, bonus_info: dict) -> str:
+        """
+        说明为什么算不出兑换方案，让记录里能直接看到原因而不是一句「无可用兑换方案」。
+
+        :param bonus_info: 魔力商店信息
+        :return: 原因描述
+        """
+        items = bonus_info.get("available_items") or []
+        if not items:
+            return "魔力商店没有解析到兑换项（站点商店结构不被适配器支持，或 Cookie 已失效取到的是登录页）"
+
+        type_names = {"upload": "上传量", "download": "下载量", "both": "上传量/下载量"}
+        type_name = type_names.get(self._exchange_type, self._exchange_type)
+        traffic_items = self._filter_traffic_items(items)
+        if not traffic_items:
+            return (f"商店里没有「{type_name}」类档位，当前兑换类型设置为 {self._exchange_type}\n"
+                    f"可改为「上传量/下载量」或换档位")
+
+        tiers = "、".join([f"{item.get('name')}({item.get('cost')})" for item in traffic_items[:3]])
+        usable_items = [item for item in traffic_items if item.get("available", True)]
+        uploads = [item for item in traffic_items if self._item_kind(item) == "upload"]
+        downloads = [item for item in traffic_items
+                     if self._item_kind(item) == "download" and item.get("available", True)]
+        upload_usable = [item for item in traffic_items
+                         if self._item_kind(item) == "upload" and item.get("available", True)]
+        no_download_to_unlock = (self._exchange_type == "both" and bool(uploads) and not downloads)
+        if not usable_items:
+            text = (f"「{type_name}」档位全部被站点禁用（兑换按钮不可点，通常是分享率已达标、等级或次数受限）\n"
+                    f"禁用档位: {tiers}")
+            return text + ("\n商店没有可用的下载量档位来压低分享率解锁上传档" if no_download_to_unlock else "")
+        if no_download_to_unlock and not upload_usable:
+            return ("上传量档位已全部被站点禁用，且没有可用的下载量档位来压低分享率解锁\n"
+                    f"禁用档位: {tiers}")
+
+        min_cost = min(item.get("cost", 0) for item in usable_items)
+        current_bonus = bonus_info.get("current_bonus", 0) or 0
+        if self._strategy == "keep_balance":
+            return (f"可用魔力值不足：余额 {current_bonus} - 保留值 {self._keep_balance} = "
+                    f"{round(current_bonus - self._keep_balance, 2)}，低于最低档位消耗 {min_cost}")
+        return f"最低档位消耗 {min_cost}，超过当前余额 {current_bonus}"
+
+    # 列表文本交给浏览器按容器宽度自动换行，覆盖 Vuetify 默认的单行截断样式
+    _WRAP_STYLE = ("display:block;white-space:normal;overflow:visible;"
+                   "text-overflow:clip;-webkit-line-clamp:unset")
+
+    def _filter_traffic_items(self, items: List[dict]) -> List[dict]:
+        """根据兑换类型筛选流量项目。"""
+        filtered = []
+        for item in items:
+            name = item.get("name", "").lower()
+            is_upload = "上传" in name or "upload" in name
+            is_download = "下载" in name or "download" in name
+            
+            if self._exchange_type == "upload" and is_upload:
+                filtered.append(item)
+            elif self._exchange_type == "download" and is_download:
+                filtered.append(item)
+            elif self._exchange_type == "both" and (is_upload or is_download):
+                filtered.append(item)
+        
+        return filtered
+
+    def _parse_api_bonus_page(self, req_utils: RequestUtils, site_url: str, html: str) -> Optional[dict]:
+        """
+        解析API模式的魔力商店页面（如青蛙站点）。
+
+        :param req_utils: 请求工具
+        :param site_url: 站点URL
+        :param html: 页面 HTML 内容
+        :return: 解析结果字典
+        """
+        if not html:
+            return None
+
+        result = {
+            "current_bonus": 0,
+            "available_items": [],
+        }
+
+        try:
+            # 解析当前魔力值
+            bonus_patterns = [
+                r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
+                r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
+                r'当前([\d][\d,.]*\d)',
+                r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',
+                r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',
+            ]
+            for pattern in bonus_patterns:
+                bonus_match = re.search(pattern, html, re.IGNORECASE)
+                if bonus_match:
+                    bonus_str = bonus_match.group(1).replace(",", "")
+                    try:
+                        result["current_bonus"] = float(bonus_str)
+                    except ValueError:
+                        pass
+                    break
+
+            # 通过API获取兑换项目列表
+            api_url = urljoin(site_url, "api/bonus-shop/getItems")
+            logger.info(f"请求API: {api_url}")
+            
+            res = req_utils.get_res(api_url)
+            if not res or res.status_code != 200:
+                logger.warn(f"API请求失败: {res.status_code if res else 'None'}")
+                return result
+
+            # 解析JSON响应
+            try:
+                items_data = json.loads(res.text)
+                logger.info(f"API返回 {len(items_data)} 个项目")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                return result
+
+            # 转换API数据为统一格式
+            items = []
+            for item in items_data:
+                item_id = item.get("id")
+                item_name = item.get("name", "")
+                cost = item.get("a_amount", 0)  # 消耗的蝌蚪/魔力值
+                b_type = item.get("b_type", "")  # uploaded 或 downloaded
+                b_amount = item.get("b_amount", 0)  # 获得的字节数
+
+                # 计算性价比
+                ratio = 0
+                if b_type == "uploaded" and b_amount > 0:
+                    gb = b_amount / (1024 * 1024 * 1024)  # 转换为GB
+                    ratio = gb / cost if cost > 0 else 0
+                elif b_type == "downloaded" and b_amount > 0:
+                    gb = b_amount / (1024 * 1024 * 1024)
+                    ratio = gb / cost * 0.5 if cost > 0 else 0
+
+                items.append({
+                    "option": item_id,
+                    "name": item_name,
+                    "cost": cost,
+                    "ratio": ratio,
+                    "available": True,  # API模式默认都可用
+                    "b_type": b_type,
+                    "b_amount": b_amount,
+                })
+
+            result["available_items"] = items
+            logger.info(f"API解析到 {len(items)} 个兑换项目，当前魔力值: {result['current_bonus']}")
+
+        except Exception as e:
+            logger.error(f"API解析魔力商店失败: {str(e)}", exc_info=True)
+            return None
+
+        return result
+
+    def _exchange_api_item(self, req_utils: RequestUtils, site_url: str, item_id: int,
+                           item_name: str, cost: float) -> dict:
+        """
+        执行API模式的单个兑换操作。
+
+        :param req_utils: 请求工具
+        :param site_url: 站点URL
+        :param item_id: 兑换选项 ID
+        :param item_name: 兑换项名称
+        :param cost: 消耗魔力值
+        :return: 兑换结果
+        """
+        try:
+            logger.info(f"开始API兑换: {item_name} (消耗: {cost})")
+
+            # POST 请求兑换
+            exchange_url = urljoin(site_url, "api/bonus-shop/exchange")
+            data = {
+                "id": str(item_id),
+                "amount": "1",  # 数量为1
+            }
+
+            res = req_utils.post_res(url=exchange_url, data=data)
+
+            if not res:
+                logger.debug(f"{item_name} API兑换请求失败: 无响应")
+                return {"success": False, "error": "请求失败"}
+
+            if res.status_code != 200:
+                logger.debug(f"{item_name} API兑换请求失败: 状态码 {res.status_code}")
+                return {"success": False, "error": f"状态码: {res.status_code}"}
+
+            # 解析JSON响应
+            try:
+                result_data = json.loads(res.text)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败: {e}")
+                return {"success": False, "error": "响应解析失败"}
+
+            # 检查是否兑换成功
+            if result_data.get("success"):
+                logger.info(f"API兑换成功: {item_name}")
+                return {"success": True}
+            else:
+                error_msg = result_data.get("msg", "未知错误")
+                logger.warn(f"API兑换失败: {item_name} - {error_msg}")
+                return {"success": False, "error": error_msg}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _check_circuit_breaker(self, site_name: str) -> bool:
+        """检查站点本轮是否已触发熔断。"""
+        with self._breaker_lock:
+            fail_count = self._circuit_breaker.get(site_name, 0)
+        return fail_count >= self._circuit_break_threshold
+
+    def _record_circuit_break(self, site_name: str) -> None:
+        """累加站点本轮失败计数；多站点并发读写同一字典，必须持锁。"""
+        with self._breaker_lock:
+            current = self._circuit_breaker.get(site_name, 0)
+            self._circuit_breaker[site_name] = current + 1
+
+    def _clear_circuit_break(self, site_name: str) -> None:
+        """本轮兑到东西就清零，早先一两笔偶发失败不该累积成熔断。"""
+        with self._breaker_lock:
+            self._circuit_breaker.pop(site_name, None)
+
+    # 把冗长的跳过原因压成短标签，同类站点合并成一行（按顺序优先匹配）
+    # 「没花钱的原因是设置或站点限制，不是插件出错」这类短句：统一按跳过处理，不进【失败】
+    _BENIGN_STOP_KEYWORDS = (
+        "超过可用魔力值",
+        "可用魔力值不足",
+        "最低档位消耗",
+        "已达保留值",
+        "未超过保留值",
+        "魔力值已用尽",
+        "没有预算内可兑换的档位",
+        "没有可用的下载量档位",
+        "全部被站点禁用",
+        "没有解析到兑换项",
+        "商店里没有「",
+        "演练模式",
+    )
+    _SKIP_LABELS = (
+        ("上传档禁用且无下载档可解锁", ("没有可用的下载量档位",)),
+        ("演练模式未提交兑换", ("演练模式",)),
+        ("站点已禁用全部档位", ("全部被站点禁用",)),
+        ("未达保留值", ("未超过保留值", "已达保留值")),
+        ("商店未解析到兑换项", ("没有解析到兑换项",)),
+        ("没有匹配的档位类型", ("商店里没有「",)),
+        ("可用魔力值不足", ("可用魔力值不足", "超过可用魔力值", "魔力值已用尽",
+                            "没有预算内可兑换的档位")),
+        ("余额低于最低档位", ("最低档位消耗",)),
+        ("本轮连续失败已熔断", ("熔断",)),
+    )
+    # 未兑换分组每行列出的站点数；站点更多时换行继续列，不再折叠掉站名
+    _MAX_LIST_SITES = 8
+    # 通知标题，正文预算要把标题占的字节一起扣掉
+    _NOTIFY_TITLE = "魔力值自动兑换完成"
+    # 企业微信群机器人 text 的 content 上限是 2048 UTF-8 字节；emoji 一个占 4 字节，
+    # 预算相应放宽到 2000，仍留 48 字节余量防整条被拒
+    _MAX_NOTIFY_BYTES = 2000
+    # 单轮通知最多拆几条：企微机器人限每分钟 20 条，这里再收紧，
+    # 超出上限的尾部内容折叠成一行指引而不是继续刷屏
+    _MAX_NOTIFY_PARTS = 5
+    # 通知明细行缩进：企微 text 不渲染 Markdown，只靠换行、空格和图标分层级
+    _NOTIFY_INDENT = "  "
+    # 分层图标表：企微按纯文本投递，emoji 是这里最省字节的视觉锚点。
+    # 每行都写全「魔力/分享率/失败」等文字，图标只是行首标记，
+    # 个别客户端缺字形渲染成方框时，通知语义仍然完整可读。
+    _ICON_SITE = "📍"
+    _ICON_BONUS = "💧"
+    _ICON_RATIO = "📈"
+    _ICON_ITEMS = "📦"
+    _ICON_STOP = "🛑"
+    _ICON_DONE = "✅"
+    _ICON_FAILED = "❌"
+    _ICON_SKIPPED = "🚫"
+    _ICON_SUMMARY = "📊"
+    _ICON_COUNTS = "📋"
+    _ICON_DRY_RUN = "🧪"
+    _ICON_SKIP_DETAIL = "📎"
+    _ICON_TRUNCATED = "📄"
+    # 档位名形如 "10.0 GB上传量"；单位表要与 _TIER_SIZE_RE 保持一致，
+    # 否则站点写 GiB 时详情页和通知里的流量汇总会整块消失
+    _TRAFFIC_RE = re.compile(
+        r"([\d.]+)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*(上传量|下载量)", re.IGNORECASE)
+    # 单位显示名归一，避免 "gb" 与 "GB" 被拆成两组分别计数
+    _UNIT_LABELS = {"KB": "KB", "KIB": "KiB", "MB": "MB", "MIB": "MiB",
+                    "GB": "GB", "GIB": "GiB", "TB": "TB", "TIB": "TiB"}
+
+    @staticmethod
+    def _conf_int(value: Any, default: int, label: str) -> int:
+        """
+        配置项转整数：空值取默认，非法值回落默认并记日志。
+
+        直接在 init_plugin 里对空串或乱填的值 int() 会让插件初始化失败，
+        用户看到的只是插件「没跑」，很难联想到是某个配置项写坏了。
+        """
+        if value is None or value == "":
+            return default
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            logger.warning(f"魔力值兑换配置「{label}」不是有效整数（{value}），按 {default} 处理")
+            return default
+
+    @staticmethod
+    def _conf_float(value: Any, default: float, label: str) -> float:
+        """配置项转浮点：空值取默认，非法值回落默认并记日志，理由同 _conf_int。"""
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            logger.warning(f"魔力值兑换配置「{label}」不是有效数字（{value}），按 {default} 处理")
+            return default
+
+    @staticmethod
+    def _fmt_num(value: Any) -> str:
+        """统一格式化魔力值：整数不留小数位，小数最多两位并去尾零，附加千分位。"""
+        try:
+            num = float(value or 0)
+        except (TypeError, ValueError):
+            return str(value)
+        if num == int(num):
+            return f"{int(num):,}"
+        return f"{num:,.2f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _one_line(value: Any, limit: int = 120) -> str:
+        """只取原因首行并压缩空白，多行说明留给插件页面展示。"""
+        line = re.sub(r"\s+", " ", str(value or "").split("\n", 1)[0]).strip()
+        return f"{line[:limit]}…" if len(line) > limit else line
+
+    def _ratio_text(self, result: dict) -> str:
+        """
+        详情页与通知里的分享率一行：取不到基线就返回空串不显示。
+
+        分享率默认直接取魔力商店页上站点显示的值（首抓与收尾各一次，不额外请求）；
+        只有商店页解析不到时，才退回站点用户数据基线加本轮成交增量推演，
+        这种情况下行首标成「分享率(推演)」，与站点实测值区分开。
+        """
+        before = result.get("ratio_before")
+        after = result.get("ratio_after")
+        if not before or not after:
+            predict = self._one_line(result.get("ratio_predict"), 40)
+            return f"分享率 {predict}" if predict else ""
+        label = ("分享率" if result.get("ratio_source") in (None, "站点页面")
+                 else "分享率(推演)")
+        if abs(float(after) - float(before)) < 0.005:
+            return f"{label} {float(before):.2f}（未变动）"
+        delta = float(after) - float(before)
+        arrow = "↑" if delta > 0 else "↓"
+        return (f"{label} {float(before):.2f} → {float(after):.2f}"
+                f"（{arrow}{abs(delta):.2f}）")
+
+    @classmethod
+    def _is_benign_stop(cls, error: Any) -> bool:
+        """判断未产生兑换的原因是否属于「按设置/站点限制没花钱」，而不是插件出错。"""
+        raw = str(error or "")
+        return any(keyword in raw for keyword in cls._BENIGN_STOP_KEYWORDS)
+
+    def _finish_site_status(self, result: dict, site_name: str = "") -> None:
+        """
+        收尾单站状态：兑到东西算成功，没兑到再区分是限制（跳过）还是出错（失败）。
+
+        余额没超过保留值、档位最低消耗超出预算、上传档全禁用又没有下载档可解锁，
+        这些都是设置或站点限制，魔力一分没动，不该出现在通知的【失败】里。
+        """
+        if result.get("exchanged"):
+            result["status"] = "success"
+            if site_name:
+                self._clear_circuit_break(site_name)
+        elif result.get("error") and not self._is_benign_stop(result.get("error")):
+            result["status"] = "failed"
+        else:
+            result["status"] = "skipped"
+
+    @classmethod
+    def _skip_label(cls, error: Any) -> str:
+        """把跳过原因归类成短标签，无法归类时保留首行短句。"""
+        raw = str(error or "")
+        for label, keywords in cls._SKIP_LABELS:
+            if any(keyword in raw for keyword in keywords):
+                return label
+        return cls._one_line(raw or "本轮无兑换动作", 40)
+
+    @staticmethod
+    def _group_exchanged(exchanged: List[dict]) -> List[dict]:
+        """按档位与单价聚合兑换明细，同档位多笔合并，消耗大的排前面。"""
+        grouped: Dict[str, dict] = {}
+        for item in exchanged or []:
+            # 站点档位名常带多余空白，如「增加100.0 GB上传量 （将提高分享率）」，统一压紧凑
+            raw = str(item.get("gain") or item.get("item") or "未命名档位")
+            name = re.sub(r"\s+([（(])", r"\1", re.sub(r"\s+", " ", raw)).strip()
+            try:
+                cost = float(item.get("cost") or 0)
+            except (TypeError, ValueError):
+                cost = 0.0
+            row = grouped.setdefault(f"{name}|{cost}", {"name": name, "cost": cost, "count": 0})
+            row["count"] += 1
+        return sorted(grouped.values(),
+                      key=lambda row: row["cost"] * row["count"],
+                      reverse=True)
+
+    @classmethod
+    def _sum_traffic(cls, exchanged: List[dict]) -> str:
+        """累加档位名里的流量；有一笔解析不出就不给总量，避免单位混杂造成误导。"""
+        totals: Dict[Tuple[str, str], float] = {}
+        for item in exchanged or []:
+            name = str(item.get("gain") or item.get("item") or "")
+            matched = cls._TRAFFIC_RE.search(name)
+            if not matched:
+                return ""
+            amount, unit, kind = matched.groups()
+            unit = cls._UNIT_LABELS.get(unit.upper(), unit.upper())
+            try:
+                value = float(amount)
+            except ValueError:
+                return ""
+            totals[(unit, kind)] = totals.get((unit, kind), 0) + value
+        parts = []
+        for key in sorted(totals, key=lambda item: item[1] != "上传量"):
+            parts.append(f"{cls._fmt_num(totals[key])} {key[0]}{key[1]}")
+        return "、".join(parts)
+
+    def _notify_site_block(self, row: dict, detail: bool = True) -> str:
+        """
+        单站通知块：站名一行，魔力、分享率、兑换档位、停止原因各一行，行首带分层图标。
+
+        企业微信群机器人固定按 msgtype=text 投递，不渲染任何 Markdown，所以层级只靠
+        换行、缩进和 emoji。文字（魔力/分享率/失败原因）全部保留，图标只作行首锚点：
+        个别客户端缺字形时渲染成方框，通知本身仍然读得通。
+
+        detail=False 时不输出停止原因行，留给预算不足时的降级层级使用。
+        """
+        head = f"{self._ICON_SITE} {row['site']}"
+        if row["dry_run"]:
+            head += f" {self._ICON_DRY_RUN}"
+        lines = [head]
+
+        if not row["bonus_found"]:
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_BONUS} 未取到魔力值")
+        elif row["bonus_changed"]:
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_BONUS} 魔力 "
+                         f"{row['bonus_before']} → {row['bonus_after']}"
+                         f"（-{self._fmt_num(row['cost'])}）")
+        else:
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_BONUS} 魔力 "
+                         f"{row['bonus_before']}（未变动）")
+        # 分享率只在真变化时占一行，「未变动」这类噪声留给详情页
+        if row["ratio"] and row["ratio_delta"] and "未变动" not in row["ratio_delta"]:
+            tail = " ".join(part for part in (row["ratio_delta"], row["ratio_tag"]) if part)
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_RATIO} 分享率 "
+                         f"{row['ratio']} {tail}")
+
+        if row["items"]:
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_ITEMS} "
+                         + "、".join(item["label"] for item in row["items"]))
+        if detail and row["notes"]:
+            # 通知只给第一条原因，更长的推演步骤与逐条说明在详情页看
+            lines.append(f"{self._NOTIFY_INDENT}{self._ICON_STOP} {row['notes'][0][0]}")
+        return "\n".join(lines)
+
+    def _build_notification_parts(self, today_data: dict) -> List[str]:
+        """
+        把兑换结果拆成多条通知正文：汇总在前，站点按状态分组，一个语义一行，行首带图标。
+
+        企微群机器人一条事件只投一次 webhook，text 的硬限是整条 content 2048 UTF-8 字节，
+        而 emoji 比文字更吃字节。站点一多，单条只做字节截断会把末行切成半截、后面的站点
+        整块丢失。所以这里按语义边界装箱：一个站点块是不可拆的最小单位，装不进当前条
+        就整块挪到下一条，段落跨条时补一行「（续）」；条数另有上限，超出部分折叠成指引。
+        """
+        results = today_data.get("results", {})
+        # 与详情页共用同一份行数据，通知与页面的笔数、消耗、档位口径不会再分叉
+        rows = self._site_rows(results)
+        stat = self._aggregate(results)
+
+        if stat["count"]:
+            head = f"兑换 {stat['count']} 笔 · 消耗 {self._fmt_num(stat['cost'])} 魔力值"
+            if stat["traffic"]:
+                head += f" · 获得 {stat['traffic']}"
+        else:
+            head = "本轮没有兑换动作"
+        summary = (f"{self._ICON_SUMMARY} {head}\n"
+                   f"{self._ICON_COUNTS} 成功 {stat['success']} · 失败 {stat['failed']} · "
+                   f"跳过 {stat['skipped']} · 共 {stat['sites']} 个站点")
+
+        # 段落按异常优先排序：降级和截断都从尾部开始，被砍的应先是不重要的明细
+        failed_rows = [row for row in rows if row["status"] == "failed"]
+        exchanged_rows = [row for row in rows if row["status"] == "success"]
+
+        # 跳过站点按原因合并；这里用原始错误文本，短标签匹配不受明细截断影响
+        skip_groups: Dict[str, List[str]] = {}
+        skip_order: List[str] = []
+        for site_name, site_result in results.items():
+            if site_result.get("status") in ("success", "failed"):
+                continue
+            label = self._skip_label(site_result.get("error"))
+            if label not in skip_groups:
+                skip_groups[label] = []
+                skip_order.append(label)
+            # 因预算/保留值限制的站点带上余额，其余只列站名，保证一行读完
+            if label in ("未达保留值", "可用魔力值不足", "余额低于最低档位"):
+                skip_groups[label].append(
+                    f"{site_name} {self._fmt_num(site_result.get('bonus_before'))}"
+                )
+            else:
+                skip_groups[label].append(site_name)
+        skip_total = sum(len(names) for names in skip_groups.values())
+
+        # 未兑换分组：每个原因一行，站点超过 _MAX_LIST_SITES 就换行续列。
+        # 以前折叠成「等 N 个站点」，在允许拆多条之后就没有理由再丢站名
+        skip_lines = []
+        for label in skip_order:
+            names = skip_groups[label]
+            for start in range(0, len(names), self._MAX_LIST_SITES):
+                chunk = names[start:start + self._MAX_LIST_SITES]
+                suffix = "" if not start else "（续）"
+                skip_lines.append(f"{self._NOTIFY_INDENT}{self._ICON_SKIP_DETAIL} "
+                                  f"{label}{suffix}：{'、'.join(chunk)}")
+
+        # 装箱单位是 (所属段落标题, 块正文)；段头与首块绑定，保证每条都能自解释
+        blocks: List[Tuple[str, str]] = [("", summary)]
+        for icon, label, items in (
+                (self._ICON_FAILED, "失败",
+                 [self._notify_site_block(row) for row in failed_rows]),
+                (self._ICON_DONE, "已兑换",
+                 [self._notify_site_block(row) for row in exchanged_rows]),
+                (self._ICON_SKIPPED, "未兑换", skip_lines),
+        ):
+            if not items:
+                continue
+            section = f"{icon} {label} {len(items)} 站"
+            blocks.append((section, items[0]))
+            blocks.extend((section, item) for item in items[1:])
+
+        # 标题与页码都要从每条的额度里先扣掉
+        title_cost = self._utf8_bytes(f"{self._NOTIFY_TITLE}\n")
+        page_cost = self._utf8_bytes("\n\n（第 1/1 条）")
+        budget = self._MAX_NOTIFY_BYTES - title_cost - page_cost
+
+        packed: List[List[str]] = []
+        current: List[str] = []
+        used = 0
+        for section, block in blocks:
+            block_cost = self._utf8_bytes(block)
+            if current and used + block_cost + 2 > budget:
+                # 当前条装不下：整块挪到新条，绝不从句子中间切开
+                packed.append(current)
+                current = []
+                used = 0
+                if section:
+                    cont = f"{section}（续）"
+                    current.append(cont)
+                    used = self._utf8_bytes(cont) + 2
+            current.append(block)
+            used += block_cost + 2
+        if current:
+            packed.append(current)
+
+        # 条数上限：企微机器人每分钟 20 条，尾部溢出折叠成一行指引
+        if len(packed) > self._MAX_NOTIFY_PARTS:
+            hidden = sum(item.count(self._ICON_SITE)
+                         for part in packed[self._MAX_NOTIFY_PARTS - 1:] for item in part)
+            packed = (packed[:self._MAX_NOTIFY_PARTS - 1]
+                      + [[f"{self._ICON_TRUNCATED} 另有 {hidden} 个站点明细未列出，"
+                          f"完整记录见插件详情页"]])
+
+        footer = f"\n{self._ICON_TRUNCATED} 内容过长已截断，完整明细见插件详情页"
+        parts: List[str] = []
+        for item in packed:
+            body = "\n\n".join(item)
+            # 兜底：单个块本身就超预算时（超长站点名或几十档同站）才按字节截断
+            if self._utf8_bytes(body) > budget:
+                body = (self._cut_utf8(body, budget - self._utf8_bytes(footer)) + footer)
+            parts.append(body)
+        if len(parts) > 1:
+            parts = [f"{body}\n\n（第 {index}/{len(parts)} 条）"
+                     for index, body in enumerate(parts, 1)]
+        return parts
+
+    @staticmethod
+    def _utf8_bytes(text: str) -> int:
+        """按 UTF-8 计量字节数：企微这类渠道按字节限制长度，一个中文就占 3 字节。"""
+        return len(text.encode("utf-8"))
+
+    @staticmethod
+    def _cut_utf8(text: str, limit: int) -> str:
+        """按字节预算截断并在字符边界收尾，避免把一个中文切成半个乱码。"""
+        if limit <= 0:
+            return ""
+        return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore").rstrip()
+
+    def _send_notification(self, today_data: dict) -> None:
+        """
+        发送兑换结果通知：内容装不下一条时拆成多条投递。
+
+        企微群机器人一条事件只发一条 text，整条 content 受 2048 字节硬限；
+        分条保证站点再多也不丢内容，条数上限避免撞机器人的每分钟频率限制。
+        """
+        for text in self._build_notification_parts(today_data):
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=self._NOTIFY_TITLE,
+                text=text,
+            )
+
+
+class NexusPHPBonusAdapter:
+    """NexusPHP 魔力商店适配器。"""
+
+    # 判定兑换真实落地所需的最小扣费比例（容忍站点同时产生的做种收益）
+    _MIN_DEDUCT_RATIO = 0.5
+
+    def parse_bonus_page(self, html: str) -> Optional[dict]:
+        """
+        解析魔力商店页面。
+
+        :param html: 页面 HTML 内容
+        :return: 解析结果字典
+        """
+        if not html:
+            return None
+
+        result = {
+            "current_bonus": 0,
+            "available_items": [],
+        }
+
+        try:
+            # 解析当前魔力值
+            # 常见格式:
+            #   [使用&说明]：554689.9  (PT时间)
+            #   [使用</a>]: 7,105,672.0  (红豆饭等)
+            #   魔力值（当前7,005,772.0  (部分站点)
+            #   蝌蚪...使用</a>]: 329,468.8  (青蛙)
+            #   憨豆...<div class="text-base font-bold">17122.9</div>  (憨憨)
+            bonus_patterns = [
+                r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',  # ]：数字
+                r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',   # ]: 数字
+                r'当前([\d][\d,.]*\d)',                       # 当前数字
+                r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',       # 青蛙特殊div
+                r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',  # 憨憨特殊div
+            ]
+            for pattern in bonus_patterns:
+                bonus_match = re.search(pattern, html, re.IGNORECASE)
+                if bonus_match:
+                    bonus_str = bonus_match.group(1).replace(",", "")
+                    try:
+                        result["current_bonus"] = float(bonus_str)
+                    except ValueError:
+                        pass
+                    break
+
+            # 解析可兑换项目
+            # 格式1 (标准NexusPHP): <form action="?action=exchange" method="post">
+            #        <input type="hidden" name="option" value="X" />
+            #        <h1>项目名称</h1>
+            #        <td>价格</td>
+            #        <input type="submit" value="交换" />
+            #       </form>
+            # 格式2 (憨憨等): <form action="?action=exchange" method="post">
+            #        <input type="hidden" name="option" value="X" />
+            #        <div class="font-bold text-base">项目名称</div>
+            #        <div class="break-all">价格</div>
+            #        <input type="submit" value="交换" />
+            #       </form>
+            items = []
+
+            # 查找所有 form 表单
+            form_pattern = r'<form[^>]*action=["\']?\?action=exchange["\']?[^>]*>(.*?)</form>'
+            forms = re.findall(form_pattern, html, re.DOTALL | re.IGNORECASE)
+
+            for form_html in forms:
+                # 提取 option value
+                option_match = re.search(r'<input[^>]*name=["\']option["\'][^>]*value=["\'](\d+)["\']', form_html, re.IGNORECASE)
+                if not option_match:
+                    continue
+                option_id = int(option_match.group(1))
+
+                # 提取项目名称 - 先尝试 h1 标签，再尝试 div 标签
+                name_match = re.search(r'<h1[^>]*>(.*?)</h1>', form_html, re.IGNORECASE | re.DOTALL)
+                if not name_match:
+                    # 尝试 div 标签（憨憨等站点）
+                    name_match = re.search(r'<div[^>]*class=["\'][^"\']*font-bold[^"\']*["\'][^>]*>(.*?)</div>', form_html, re.IGNORECASE | re.DOTALL)
+                if not name_match:
+                    continue
+                item_name = self._clean_html(name_match.group(1))
+
+                # 提取价格 - 先尝试 td 标签，再尝试 div 标签
+                price_match = re.search(r'<td[^>]*align=["\']?center["\']?[^>]*>([\d,.]+)</td>', form_html, re.IGNORECASE)
+                if not price_match:
+                    # 尝试 div 标签（憨憨等站点）
+                    price_match = re.search(r'<div[^>]*class=["\'][^"\']*break-all[^"\']*["\'][^>]*>([\d,.]+)</div>', form_html, re.IGNORECASE)
+                if not price_match:
+                    # 尝试其他格式
+                    price_match = re.search(r'(\d[\d,.]*)\s*(?:个)?魔力', form_html, re.IGNORECASE)
+                if not price_match:
+                    continue
+
+                price_str = price_match.group(1).replace(",", "")
+                try:
+                    cost = float(price_str)
+                except ValueError:
+                    continue
+
+                # 检查是否可以交换 (submit 按钮未 disabled)
+                # 匹配整个 submit input 标签，包括后面的 disabled 属性
+                submit_match = re.search(r'<input[^>]*type=["\']submit["\'][^>]*/?\s*>', form_html, re.IGNORECASE)
+                is_available = True
+                if submit_match:
+                    submit_tag = submit_match.group(0)
+                    if re.search(r'\bdisabled\b', submit_tag, re.IGNORECASE):
+                        is_available = False
+
+                # 计算性价比
+                ratio = self._calculate_ratio(item_name, cost)
+
+                items.append({
+                    "option": option_id,
+                    "name": item_name,
+                    "cost": cost,
+                    "ratio": ratio,
+                    "available": is_available,
+                })
+
+            result["available_items"] = items
+            logger.debug(f"解析到 {len(items)} 个兑换项目，当前魔力值: {result['current_bonus']}")
+
+        except Exception as e:
+            logger.error(f"解析魔力商店失败: {str(e)}", exc_info=True)
+            return None
+
+        return result
+
+    def _clean_html(self, html: str) -> str:
+        """清理 HTML 标签，提取纯文本。"""
+        if not html:
+            return ""
+        # 移除 HTML 标签
+        text = re.sub(r'<[^>]+>', ' ', html)
+        # 移除多余空白
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
+    def _calculate_ratio(self, item_name: str, cost: float) -> float:
+        """计算兑换项的性价比。"""
+        if cost <= 0:
+            return 0
+        # 上传量兑换
+        if "上传" in item_name or "upload" in item_name.lower():
+            upload_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:GB|GiB)', item_name, re.IGNORECASE)
+            if upload_match:
+                upload_gb = float(upload_match.group(1))
+                return upload_gb / cost
+        # 下载量兑换
+        if "下载" in item_name or "download" in item_name.lower():
+            download_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:GB|GiB)', item_name, re.IGNORECASE)
+            if download_match:
+                download_gb = float(download_match.group(1))
+                return download_gb / cost * 0.5  # 下载量权重较低
+        return 0
+
+    def exchange_item(self, req_utils: RequestUtils, bonus_url: str, item_id: int,
+                      item_name: str, cost: float,
+                      bonus_before: Optional[float] = None) -> dict:
+        """
+        执行单个兑换操作。
+
+        :param req_utils: 请求工具
+        :param bonus_url: 魔力商店 URL
+        :param item_id: 兑换选项 ID
+        :param item_name: 兑换项名称
+        :param cost: 消耗魔力值
+        :param bonus_before: 兑换前的魔力值，用于比对是否真实扣费
+        :return: 兑换结果
+        """
+        try:
+            logger.info(f"开始兑换: {item_name} (消耗: {cost}, 兑换前余额: {bonus_before})")
+
+            # POST 请求兑换 - 格式: ?action=exchange, option=X
+            exchange_url = f"{bonus_url}?action=exchange"
+            data = {
+                "option": str(item_id),
+                "submit": "交换",
+            }
+
+            res = req_utils.post_res(url=exchange_url, data=data)
+
+            if not res:
+                logger.debug(f"{item_name} 兑换请求失败: 无响应")
+                return {"success": False, "error": "请求失败"}
+
+            if res.status_code != 200:
+                logger.debug(f"{item_name} 兑换请求失败: 状态码 {res.status_code}")
+                return {"success": False, "error": f"状态码: {res.status_code}"}
+
+            # 调试：记录响应片段
+            logger.debug(f"{item_name} 兑换响应前500字符: {res.text[:500]}")
+
+            # 以「兑换前后余额差」判定结果：站点是否真实扣费才是唯一可靠依据
+            new_bonus = self._parse_page_bonus(res.text)
+
+            if bonus_before is not None and cost and cost > 0:
+                threshold = cost * self._MIN_DEDUCT_RATIO
+                deducted = bonus_before - new_bonus if new_bonus is not None else None
+                if deducted is None or deducted < threshold:
+                    # 响应页看不出扣费，站点可能返回跳转前的页面，重抓商店页再确认
+                    for wait_seconds in (1, 3):
+                        time.sleep(wait_seconds)
+                        check_res = req_utils.get_res(url=bonus_url)
+                        if not check_res or check_res.status_code != 200:
+                            continue
+                        refetched = self._parse_page_bonus(check_res.text)
+                        if refetched is None:
+                            continue
+                        new_bonus = refetched
+                        deducted = bonus_before - new_bonus
+                        if deducted >= threshold:
+                            break
+                if deducted is not None and deducted >= threshold:
+                    logger.info(f"{item_name} 兑换成功: 余额 {bonus_before} → {new_bonus}，实际扣除 {round(deducted, 2)}")
+                    return {"success": True, "bonus_after": new_bonus, "deduct": round(deducted, 2)}
+                error_msg = self._extract_notice(res.text) or "魔力值未减少"
+                logger.warn(f"{item_name} 兑换失败: {error_msg}（余额 {bonus_before} → {new_bonus}）")
+                return {"success": False, "error": error_msg, "bonus_after": new_bonus}
+
+            # 缺少兑换前基线时退回提示文本判定；无法确认一律按失败处理，避免重复提交
+            notice = self._extract_notice(res.text)
+            if notice:
+                logger.warn(f"{item_name} 兑换失败: {notice}")
+                return {"success": False, "error": notice, "bonus_after": new_bonus}
+            for keyword in ["兑换成功", "交易成功", "交换成功", "成功", "success"]:
+                if keyword.lower() in res.text.lower():
+                    logger.info(f"{item_name} 兑换成功: 命中站点提示关键字 {keyword}")
+                    return {"success": True, "bonus_after": new_bonus}
+            logger.warn(f"{item_name} 无法确认兑换结果，按失败处理以避免重复提交")
+            return {"success": False, "error": "无法确认兑换结果", "bonus_after": new_bonus}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _parse_page_bonus(self, html: str) -> Optional[float]:
+        """
+        从魔力商店页面解析当前魔力值。
+
+        :param html: 页面 HTML 内容
+        :return: 解析到的魔力值，解析不到返回 None
+        """
+        if not html:
+            return None
+        bonus_patterns = [
+            r'(?:使用|详情)[^]]*]：\s*([\d][\d,.]*\d)',
+            r'(?:使用|详情)[^]]*]:\s*([\d][\d,.]*\d)',
+            r'当前([\d][\d,.]*\d)',
+            r'魔力值[^:：]*[：:]\s*([\d][\d,.]*\d)',
+            r'qingwa-bonus[^>]*>([\d][\d,.]*\d)<',
+            r'icon-bean-orange[^<]*<[^>]*>([\d][\d,.]*\d)<',
+        ]
+        for pattern in bonus_patterns:
+            bonus_match = re.search(pattern, html, re.IGNORECASE)
+            if not bonus_match:
+                continue
+            try:
+                return float(bonus_match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+        return None
+
+    def _extract_notice(self, html: str) -> Optional[str]:
+        """
+        从站点提示块里提取失败原因，避免把商店页的固定说明文字当成兑换失败。
+        """
+        if not html:
+            return None
+        blocks = re.findall(
+            r'<div[^>]*class=["\'][^"\']*(?:std|message|error|warning|tip)[^"\']*["\'][^>]*>(.*?)</div>',
+            html, re.DOTALL | re.IGNORECASE)
+        notice = " ".join(self._clean_html(block) for block in blocks)
+        notice = re.sub(r'\s+', ' ', notice).strip()
+        if not notice:
+            return None
+        if re.search(r'(失败|不足|不允许|无法|不能|已很高|权限|等级不够|用完|超过|限制|无效)', notice, re.IGNORECASE):
+            return notice[:120]
+        return None
