@@ -5,9 +5,10 @@
 | 项目 | 值 |
 | --- | --- |
 | 插件 ID | `AliyunBalance` |
-| 插件目录 | `plugins.v2/aliyunbalance` |
-| 索引 | `package.v2.json`（V2 代次索引，本实例 MoviePilot v3.2.2 实测可用） |
+| 插件目录 | `plugins.v3/aliyunbalance`（仓库同时保留 `plugins.v2/aliyunbalance` 镜像，两份内容一致） |
+| 索引 | `package.v3.json` 与 `package.v2.json` |
 | 本文档对应版本 | `1.6.10` |
+| 适用 MoviePilot | **V3**（`system_version >= 3.0.0`，本实例 v3.2.2 实测；代码使用 `app.sdk.*` 与链式事件，V2 宿主无法加载） |
 | 权限等级 | `auth_level = 1`（进入插件页需要管理员登录态） |
 | 作者 | 左岸 |
 | 数据来源 | 阿里云 BssOpenApi `QueryAccountBalance`（版本 `2017-12-14`） |

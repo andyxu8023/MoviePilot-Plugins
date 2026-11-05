@@ -89,6 +89,7 @@
     "author": "左岸",
     "level": 1,
     "plugin_readme": "https://github.com/andyxu8023/MoviePilot-Plugins/blob/main/plugins.v2/aliyunbalance/README.md",
+    "system_version": ">=3.0.0",
     "history": {
       "v1.6.10": "移除预计续航：卡片、详情页和告警都不再显示续航，只留今日消耗与速率",
       "v1.6.9": "告警消息重排：不再重复余额和状态，阈值行只留本次触发的条件，进度条口径不进通知",
