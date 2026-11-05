@@ -52,7 +52,7 @@ class AliyunBalance(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/andyxu8023/"
                    "MoviePilot-Plugins/main/icons/aliyunbalance.png")
     # 插件版本
-    plugin_version = "1.6.11"
+    plugin_version = "1.6.12"
     # 插件标签
     plugin_label = "工具,监控,云服务"
     # 插件作者
@@ -780,12 +780,21 @@ class AliyunBalance(_PluginBase):
             return self._bar_full
         return self._warn_threshold if self._warn_threshold > 0 else 0.0
 
-    def _bar_ratio(self, value: Optional[float], status: str) -> float:
-        """余额相对满格金额的百分比（0-100）：无读数或没有任何口径时按状态给满格或空条。"""
+    def _bar_ratio_exact(self, value: Optional[float], status: str) -> float:
+        """余额相对满格金额（未设置时按预警线）的实际百分比，不做上下钳制。
+
+        卡片上的数字按实际结果显示：高于满格金额就写 137%，欠费为负就写 -12%，
+        不再一律压成 100% 或 0%。进度条仍用钳制后的 _bar_ratio，否则
+        VProgressLinear 会画出一条溢出容器的满格条。
+        """
         full = self._bar_full_amount()
         if value is not None and full > 0:
-            return max(min(value / full * 100, 100), 0)
+            return value / full * 100
         return 100 if status == "normal" else 0
+
+    def _bar_ratio(self, value: Optional[float], status: str) -> float:
+        """进度条填充比例：实际百分比钳制到 0-100，只用于画条。"""
+        return max(min(self._bar_ratio_exact(value, status), 100), 0)
 
     def _bar_caption(self, currency: str) -> str:
         """进度条下方的口径文案：走满格金额时带上该金额，回退预警线时保持原有写法。"""
@@ -1074,6 +1083,8 @@ class AliyunBalance(_PluginBase):
         value = self._opt_float(record.get("watch_value"))
         warn = self._warn_threshold
         ratio = self._bar_ratio(value, status)
+        # 条子钳制、数字用实际值：超过满格金额时卡片要能看出超了多少
+        caption_ratio = self._bar_ratio_exact(value, status)
         spent, rate = self._burn_metrics(value)
         # 进度条颜色只反映「最后已知读数」的档位：查询失败时不能用 error 色去涂一根
         # 满格条，那和 100% 自相矛盾；失败信号已经由状态徽章和错误行表达了
@@ -1115,7 +1126,7 @@ class AliyunBalance(_PluginBase):
             {"component": "VProgressLinear",
              "props": {"model-value": round(ratio, 1), "color": bar_color,
                        "height": 8, "rounded": True, "class": "mt-3"}},
-            self._dash_caption(f"{self._bar_caption(currency)} {ratio:.0f}% · {limits}"),
+            self._dash_caption(f"{self._bar_caption(currency)} {caption_ratio:.0f}% · {limits}"),
             {
                 "component": "div",
                 "props": {"class": "d-flex align-center",
