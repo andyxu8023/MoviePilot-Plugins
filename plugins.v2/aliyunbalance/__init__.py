@@ -52,7 +52,7 @@ class AliyunBalance(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/andyxu8023/"
                    "MoviePilot-Plugins/main/icons/aliyunbalance.png")
     # 插件版本
-    plugin_version = "1.6.10"
+    plugin_version = "1.6.11"
     # 插件标签
     plugin_label = "工具,监控,云服务"
     # 插件作者
@@ -2001,12 +2001,26 @@ class AliyunBalance(_PluginBase):
                         "props": {"class": "text-caption text-medium-emphasis"},
                         "text": "只读费用接口，不做任何写操作",
                     }, {
-                        "component": "VBtn",
-                        "props": {"size": "small", "variant": "tonal", "color": "primary",
-                                  "href": "https://usercenter2.aliyun.com/home",
-                                  "target": "_blank", "rel": "noopener noreferrer",
-                                  "class": "text-none"},
-                        "text": "打开阿里云费用中心",
+                        # 宿主只有「插件市场详情」会读 plugin_readme，已安装插件的界面没有任何
+                        # 说明入口，所以详情页底部自带一条指向仓库 README 的链接（新标签打开）。
+                        "component": "div",
+                        "props": {"style": "display:flex;align-items:center;gap:8px;flex-wrap:wrap"},
+                        "content": [{
+                            "component": "VBtn",
+                            "props": {"size": "small", "variant": "text", "color": "primary",
+                                      "href": self.plugin_readme,
+                                      "target": "_blank", "rel": "noopener noreferrer",
+                                      "prepend-icon": "mdi-book-open-outline",
+                                      "class": "text-none"},
+                            "text": "使用说明",
+                        }, {
+                            "component": "VBtn",
+                            "props": {"size": "small", "variant": "tonal", "color": "primary",
+                                      "href": "https://usercenter2.aliyun.com/home",
+                                      "target": "_blank", "rel": "noopener noreferrer",
+                                      "class": "text-none"},
+                            "text": "打开阿里云费用中心",
+                        }],
                     }],
                 },
             ],
