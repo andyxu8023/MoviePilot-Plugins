@@ -11,7 +11,7 @@
 # 通过站点 ApiKey 查询馒头最后浏览时间，按 40 天保活线推送剩余天数提醒，不执行自动登录。
 # 插件只调用官方允许第三方使用的 profile 接口查询最后浏览时间，不会自动登录。关闭“每日汇报”后，仅在剩余天数进入临期范围或检查失败时通知。
 # 4.[阿里云余额监控](/plugins.v3/aliyunbalance)（aliyunbalance）
-![插件名：阿里云余额监控](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/aliyunbalance-01-dashboard-card.png)
+![插件名：阿里云余额监控](https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/images/AliyunBalance.jpg)
 # 调用阿里云费用中心只读接口 QueryAccountBalance 监控可用额度与现金余额，检测到智能助手调用大模型时自动转为高频检查，低于预警线/紧急线、余额骤降或查询失败时推送通知。
 # 只读费用接口，不做任何写操作；AccessKey 建议只授予 AliyunBSSReadOnlyAccess。需要 MoviePilot V3（>=3.0.0）。
 # 使用说明：https://github.com/andyxu8023/MoviePilot-Plugins/blob/main/plugins.v3/aliyunbalance/README.md
