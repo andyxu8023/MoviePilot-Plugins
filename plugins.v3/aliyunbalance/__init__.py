@@ -52,7 +52,7 @@ class AliyunBalance(_PluginBase):
     plugin_icon = ("https://raw.githubusercontent.com/andyxu8023/"
                    "MoviePilot-Plugins/main/icons/aliyunbalance.png")
     # 插件版本
-    plugin_version = "1.6.12"
+    plugin_version = "1.6.14"
     # 插件标签
     plugin_label = "工具,监控,云服务"
     # 插件作者
@@ -784,8 +784,8 @@ class AliyunBalance(_PluginBase):
         """余额相对满格金额（未设置时按预警线）的实际百分比，不做上下钳制。
 
         卡片上的数字按实际结果显示：高于满格金额就写 137%，欠费为负就写 -12%，
-        不再一律压成 100% 或 0%。进度条仍用钳制后的 _bar_ratio，否则
-        VProgressLinear 会画出一条溢出容器的满格条。
+        不再一律压成 100% 或 0%。画条走 _bar_element：不超过满格用钳制后的单条，
+        超过时叠两根条露出超出色，VProgressLinear 本身永远收不到大于 100 的值。
         """
         full = self._bar_full_amount()
         if value is not None and full > 0:
@@ -801,6 +801,45 @@ class AliyunBalance(_PluginBase):
         if self._bar_full > 0:
             return f"相对满格金额 {self._money(self._bar_full, currency)}"
         return "相对预警线"
+
+    # 余额超过满格金额时，超出部分用这个 Vuetify 色名叠加；颜色由组件按主题解析，明暗自适应
+    _OVERFLOW_COLOR = "info"
+
+    def _bar_element(self, value: Optional[float], status: str, color: str,
+                     height: int, margin_class: str) -> dict:
+        """进度条元素：不超过满格金额时单条，超过时双色叠加，超出段从左侧起画。
+
+        宿主前端自带的 Vuetify VProgressLinear 没有多段模式，超过 100 会被钳制，
+        「画满一根条」看不出到底超了多少。叠加做法：同一条轨道里绝对定位叠两根
+        条——底条用状态色铺满整根（表示到满格金额），顶条用超出色只画「实际百分比
+        − 100」那一段并从左端起覆盖，并用 bg-opacity 关掉自身背景，于是左侧超出色
+        的宽度与实际超出成比例（137% 时左侧约 27% 条宽为超出色），右侧余下部分保持
+        状态色。同层绝对定位元素按 DOM 顺序绘制，顶条在后天然盖住底条，不需要
+        z-index。
+        """
+        exact = self._bar_ratio_exact(value, status)
+        if exact <= 100:
+            return {"component": "VProgressLinear",
+                    "props": {"model-value": round(self._bar_ratio(value, status), 1),
+                              "color": color, "height": height,
+                              "rounded": True, "class": margin_class}}
+        over_share = 100 - 10000.0 / exact
+        track = (f"position:relative;height:{height}px;"
+                 f"border-radius:{height / 2:.0f}px;overflow:hidden")
+        overlay = "position:absolute;left:0;right:0;top:0;margin:0"
+        return {"component": "div",
+                "props": {"class": margin_class, "style": track},
+                "content": [
+                    {"component": "VProgressLinear",
+                     "props": {"model-value": 100, "color": color,
+                               "height": height, "rounded": True,
+                               "style": overlay}},
+                    {"component": "VProgressLinear",
+                     "props": {"model-value": round(over_share, 1),
+                               "color": self._OVERFLOW_COLOR,
+                               "height": height, "rounded": True,
+                               "bg-opacity": 0, "style": overlay}},
+                ]}
 
     def _next_check_text(self) -> str:
         """推算下一次自动检查时间：自适应按间隔估算，固定周期按 cron 推算。"""
@@ -1082,8 +1121,7 @@ class AliyunBalance(_PluginBase):
         symbol = self._currencies.get(currency.upper(), "")
         value = self._opt_float(record.get("watch_value"))
         warn = self._warn_threshold
-        ratio = self._bar_ratio(value, status)
-        # 条子钳制、数字用实际值：超过满格金额时卡片要能看出超了多少
+        # 数字用实际值：超过满格金额时卡片要能看出超了多少，条子同时叠出超出色
         caption_ratio = self._bar_ratio_exact(value, status)
         spent, rate = self._burn_metrics(value)
         # 进度条颜色只反映「最后已知读数」的档位：查询失败时不能用 error 色去涂一根
@@ -1123,9 +1161,7 @@ class AliyunBalance(_PluginBase):
                     *chips,
                 ],
             },
-            {"component": "VProgressLinear",
-             "props": {"model-value": round(ratio, 1), "color": bar_color,
-                       "height": 8, "rounded": True, "class": "mt-3"}},
+            self._bar_element(value, status, bar_color, 8, "mt-3"),
             self._dash_caption(f"{self._bar_caption(currency)} {caption_ratio:.0f}% · {limits}"),
             {
                 "component": "div",
@@ -1877,7 +1913,6 @@ class AliyunBalance(_PluginBase):
         color, label = self._status_meta.get(status, self._status_meta["unknown"])
         currency = str(record.get("currency") or "")
         value = self._opt_float(record.get("watch_value"))
-        ratio = self._bar_ratio(value, status)
         content: List[dict] = [
             {"component": "div", "props": {"style": self._hero_badge_style},
              "content": [self._chip(label, color, "flat"), self._freq_badge()]},
@@ -1891,9 +1926,7 @@ class AliyunBalance(_PluginBase):
             ]},
             {"component": "div", "props": {"style": self._sub_text_style},
              "text": f"{self._watch_label()} · 环比 {self._delta_text(record)}"},
-            {"component": "VProgressLinear",
-             "props": {"model-value": round(ratio, 1), "color": color,
-                       "height": 6, "rounded": True, "class": "mt-4"}},
+            self._bar_element(value, status, color, 6, "mt-4"),
             {"component": "div", "props": {"style": self._foot_style},
              "text": self._threshold_hint(currency)},
             {"component": "div",
