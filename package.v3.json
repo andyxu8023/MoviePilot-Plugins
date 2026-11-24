@@ -159,5 +159,20 @@
       "v1.1.0": "新增开关：配置写盘后自动重启 Clash 容器（默认开启，可填容器名与停止等待）。",
       "v1.0.0": "定时抓取订阅并按 YAML 规则改写 Clash 配置：只改目标行、其余原样保留，校验通过才备份替换，失败不动原文件；带详情页手动更新与预览差异。"
     }
+  },
+  "XingchiCheckin": {
+    "name": "星驰 API 签到",
+    "description": "会话续期与每日自动签到",
+    "labels": "签到",
+    "version": "1.1.0",
+    "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/xingchi.png",
+    "author": "左岸",
+    "author_url": "https://github.com/andyxu8023",
+    "level": 2,
+    "history": {
+      "v1.0.0": "首版",
+      "v1.0.2": "插件图标换成星驰站点 logo，作者和主页改为本地仓库统一的「左岸 / github.com/andyxu8023」。",
+      "v1.1.0": "refresh_token 改为在插件配置里填写并自动轮换，不再读写数据目录下的会话文件；旧文件首次加载时自动迁移进配置。"
+    }
   }
 }
