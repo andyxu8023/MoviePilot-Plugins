@@ -142,5 +142,22 @@
       "v1.1.0": "新增自适应频率：监听宿主 AgentTokensUsage 模型用量事件（智能助手与插件调用大模型即触发），或相邻两次余额下降超过「消费兜底阈值」时，转入每 30 分钟高频检查；活跃窗口到期后自动回落到最长 12 小时一次的日常节奏，无需改 cron 或重载插件。服务改为固定间隔唤醒 + 闸门判断，不活动时不打阿里云接口；配置新增高频间隔、活跃窗口、日常间隔、消费兜底阈值四项，关闭「自适应频率」则退回原 cron 固定周期；详情页新增「检查频率」（含窗口剩余）与「今日模型调用」（次数/token/模型/来源）",
       "v1.0.0": "初始版本：按执行周期调用官方 BssOpenApi 2017-12-14 QueryAccountBalance 读取可用额度与现金余额（标准库实现 RPC HMAC-SHA1 签名，无额外依赖）；支持预警线/紧急线/骤降百分比三档告警、同档位重复提醒间隔去重、查询失败必报；代理失败自动直连兜底且服务端已应答的错误码不跨通道重试；常见错误码自动附排查建议；详情页展示余额概况、相对预警线进度与检查历史，AccessKey 掩码、Secret 不外显"
     }
+  },
+  "ClashSubRewriter": {
+    "name": "Clash 订阅改写",
+    "description": "定时拉取机场订阅（iKuuu 等直出 Clash YAML 的站点），按 YAML 规则改写后备份并原子替换到指定目录，可选写盘后自动重启容器。",
+    "labels": "Clash,订阅,网络",
+    "version": "1.1.1",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Mihomo_Meta_A.png",
+    "author": "左岸",
+    "author_url": "https://github.com/andyxu8023",
+    "plugin_readme": "https://github.com/andyxu8023/MoviePilot-Plugins/blob/main/plugins.v3/clashsubrewriter/README.md",
+    "level": 2,
+    "system_version": ">=3.2.2,<4.0.0",
+    "history": {
+      "v1.1.1": "改写规则说明改成整块提示文字，手机上看会自动换行不再被截断。",
+      "v1.1.0": "新增开关：配置写盘后自动重启 Clash 容器（默认开启，可填容器名与停止等待）。",
+      "v1.0.0": "定时抓取订阅并按 YAML 规则改写 Clash 配置：只改目标行、其余原样保留，校验通过才备份替换，失败不动原文件；带详情页手动更新与预览差异。"
+    }
   }
 }
