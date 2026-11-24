@@ -19,7 +19,11 @@
 
 ## 令牌怎么取
 
-登录站点后打开浏览器开发者工具，在「存储」里找 `refresh_token`（Local Storage / Session Storage / Cookie 都有可能，具体存放位置以站点前端实现为准）；或者在「网络」里看一次 `POST /api/v1/auth/refresh` 的请求体，里面的 `refresh_token` 就是要填的值。复制粘贴到配置项保存即可。
+登录站点后按 F12 打开开发者工具 → **Application（应用）→ Local Storage → `https://xingchiapi.com`**，取键 **`refresh_token`** 的值，粘贴到配置项保存即可。
+
+- 同一份存储里还有 `auth_token`，那是短期访问令牌，**不要填它** —— 插件每轮都会自己用 `refresh_token` 换取。
+- 站点前端把会话存在 localStorage 的 `refresh_token` / `auth_token` / `auth_user` / `token_expires_at` 几项里，退出登录会一并清掉，届时需要重新登录再取新值。
+- 也可以在 Network 里找一次 `POST /api/v1/auth/refresh`，请求体里的 `refresh_token` 同样可用。
 
 注意：
 
