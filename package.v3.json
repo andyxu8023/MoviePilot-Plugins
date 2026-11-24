@@ -164,15 +164,17 @@
     "name": "星驰 API 签到",
     "description": "会话续期与每日自动签到",
     "labels": "签到",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "icon": "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/xingchi.png",
     "author": "左岸",
     "author_url": "https://github.com/andyxu8023",
+    "plugin_readme": "https://github.com/andyxu8023/MoviePilot-Plugins/blob/main/plugins.v3/xingchicheckin/README.md",
     "level": 2,
     "history": {
       "v1.0.0": "首版",
       "v1.0.2": "插件图标换成星驰站点 logo，作者和主页改为本地仓库统一的「左岸 / github.com/andyxu8023」。",
-      "v1.1.0": "refresh_token 改为在插件配置里填写并自动轮换，不再读写数据目录下的会话文件；旧文件首次加载时自动迁移进配置。"
+      "v1.1.0": "refresh_token 改为在插件配置里填写并自动轮换，不再读写数据目录下的会话文件；旧文件首次加载时自动迁移进配置。",
+      "v1.1.1": "补仓库 README，并在详情页底部加「使用说明」链接。"
     }
   }
 }

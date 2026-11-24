@@ -28,9 +28,12 @@ class XingchiCheckin(_PluginBase):
     plugin_name = "星驰 API 签到"
     plugin_desc = "使用已登录会话续期，每日自动签到，不参与抽奖。"
     plugin_icon = "https://raw.githubusercontent.com/andyxu8023/MoviePilot-Plugins/main/icons/xingchi.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "左岸"
     author_url = "https://github.com/andyxu8023"
+    # 使用说明入口：已安装插件投影读类属性，市场投影读 package 的 plugin_readme，两处都要给
+    plugin_readme = ("https://github.com/andyxu8023/MoviePilot-Plugins"
+                     "/blob/main/plugins.v3/xingchicheckin/README.md")
     plugin_config_prefix = "xingchicheckin_"
     plugin_order = 50
     auth_level = 2
@@ -131,7 +134,20 @@ class XingchiCheckin(_PluginBase):
                       if self._refresh_token else "会话令牌：未配置，请在配置中填写 refresh_token")
         return [{"component": "VAlert", "props": {"type": "info", "text": text}},
                 {"component": "VAlert", "props": {"type": "warning" if not self._refresh_token else "info",
-                                                  "text": token_text}}]
+                                                  "text": token_text}},
+                # 宿主只在「插件市场详情」投影 plugin_readme，已安装插件界面没有说明入口，
+                # 所以详情页底部自带一条指向仓库 README 的链接（新标签打开）。
+                {"component": "div",
+                 "props": {"style": "display:flex;align-items:center;gap:8px;flex-wrap:wrap"},
+                 "content": [{
+                     "component": "VBtn",
+                     "props": {"size": "small", "variant": "text", "color": "primary",
+                               "href": self.plugin_readme, "target": "_blank",
+                               "rel": "noopener noreferrer",
+                               "prepend-icon": "mdi-book-open-outline",
+                               "class": "text-none"},
+                     "text": "使用说明",
+                 }]}]
 
     def get_service(self):
         """按配置的 Cron 注册每日签到服务。"""
